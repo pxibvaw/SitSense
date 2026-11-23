@@ -44,7 +44,11 @@ def build_source(cfg: dict, args):
                             expected_channels=cfg["pressure"]["n_channels"])
     if args.mode == "real":
         from hardware.sensors.factory import build_hub     # Pi 전용 라이브러리는 real일 때만 불러옴
-        hub = build_hub(cfg, camera=args.camera, rotate180=args.rotate180)
+        pose, camera = None, args.camera
+        if camera == "network":                            # Pi에 카메라가 없을 때: 노트북 좌표를 네트워크로 받음
+            from hardware.sensors.network_pose import NetworkPoseSource
+            pose, camera = NetworkPoseSource(port=args.pose_port), "none"
+        hub = build_hub(cfg, camera=camera, rotate180=args.rotate180, pose=pose)
         if hub.pose is not None and hasattr(hub.pose, "power_on"):
             hub.pose.power_on()          # 카메라 PoseSource는 켜 줘야 프레임을 읽기 시작함 (서버는 전원 정책이 켬)
         return hub
@@ -73,8 +77,11 @@ def parse_args(cfg: dict) -> argparse.Namespace:
     ap.add_argument("--chair", default="", help="세션 정보: 의자")
     ap.add_argument("--cushion", default="", help="세션 정보: 방석")
     ap.add_argument("--notes", default="", help="세션 정보: 특이사항")
-    ap.add_argument("--camera", choices=["none", "picam", "webcam"], default="none",
-                    help="real 모드의 카메라: none(없이) / picam(Pi 카메라) / webcam(시험용)")
+    ap.add_argument("--camera", choices=["none", "picam", "webcam", "network"], default="none",
+                    help="real 모드의 카메라: none(없이) / picam(Pi 카메라) / webcam(시험용) / "
+                         "network(Pi에 카메라 없이, 노트북이 ai/camera/pose_sender.py로 보내는 좌표를 받음)")
+    ap.add_argument("--pose-port", type=int, default=8765,
+                    help="--camera network일 때 좌표를 받을 포트 (기본 8765)")
     ap.add_argument("--rotate180", action="store_true", help="카메라를 거꾸로 달았을 때")
     ap.add_argument("--quiet", action="store_true", help="매 줄 출력하지 않기")
     args = ap.parse_args()
