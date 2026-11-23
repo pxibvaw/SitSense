@@ -128,6 +128,8 @@ class Baseline(BaseModel):
     distance_mm: float | None = Field(None, description="기준 화면 거리 (중앙값)")
     pose: dict[str, list[float]] | None = Field(
         None, description="부위 7개의 평균 좌표 [x, y, z, visibility] (0~1 비율, 영상 아님)")
+    positions: dict[str, list[float]] | None = Field(
+        None, description="앉은 위치별 채널별 압력 기준 {front, back}. 잰 위치만 들어 있음 (바른자세(중)은 pressure)")
 
 
 class CalibrateResult(BaseModel):
@@ -259,11 +261,13 @@ class SessionBaseline(BaseModel):
     """세션의 기준 자세 — 시작 버튼을 누르면 앉은 게 확인된 뒤 10초 측정 (재개 때는 다시 재지 않음)"""
     state: BaselinePhase = Field(..., description="none 기준 없음 / waiting_seat 앉기를 기다림 / measuring 측정 중 / "
                                                   "ready 기준 있음 / failed 마지막 측정 실패")
-    kind: str | None = Field(None, description="측정 중이거나 마지막 측정의 종류 (initial / session / recalibration)")
+    kind: str | None = Field(None, description="측정 중이거나 마지막 측정의 종류 (initial / session / recalibration / position_front / position_back)")
     remaining_sec: float | None = Field(None, description="측정 중이면 남은 초 (앉기를 기다리는 중이면 측정 시간 전체)")
     fail_reason: str | None = Field(None, description="실패 이유 (no_person / sensor_lost / too_much_motion / pressure_low: 덜 눌린 센서가 있음, 깊숙이 바르게 앉기)")
     using_previous: bool = Field(..., description="이번 측정이 실패해서 직전 성공 기준으로 판단 중인지")
     measured_at: float | None = Field(None, description="지금 쓰는 기준을 잰 시각")
+    positions_done: list[str] = Field(default_factory=list,
+                                      description="앞·뒤 기준 중 잰 위치 (front / back). 바른자세(중) 기준을 다시 재면 비워짐")
 
 
 class SessionStatus(BaseModel):

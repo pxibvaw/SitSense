@@ -180,6 +180,7 @@
 | `pressure` | JSON 채널별 평균 |
 | `distance_mm` | |
 | `chest_mm` | 기준 가슴 거리 (003 마이그레이션). 가슴 센서 없음·측정 부족이면 NULL |
+| `positions` | JSON `{"front": [채널별], "back": [채널별]}` 앉은 위치별 압력 기준 (004 마이그레이션). 안 쟀으면 NULL. `/calibrate?position=`으로 잴 때 현재 행(`is_current`)에 덮어쓰고 새 행은 만들지 않음. 중 기준을 다시 재면 새 행이라 NULL로 시작 |
 | `pose` | JSON 부위 7개 × [x, y, z, vis] (기준값이라 좌표 저장) |
 | `based_on_id` | 보정 결과면 원래 기준 id |
 | `is_current` | 현재 값 (부분 unique 인덱스로 하나만) |

@@ -132,6 +132,22 @@ paths:
       - 기준 자세
       summary: 기준 자세 측정 (앉으면 10초). 세션 없이(온보딩) 또는 세션 중(설정의 다시 측정)
       operationId: calibrate_calibrate_post
+      parameters:
+      - name: position
+        in: query
+        required: false
+        schema:
+          enum:
+          - front
+          - middle
+          - back
+          type: string
+          description: middle(기본) 바른자세(중) 기준 / front 의자 앞쪽 / back 등받이까지 깊게 — front·back은
+            바른자세(중) 기준이 있을 때만 (없으면 409 NO_BASELINE)
+          default: middle
+          title: Position
+        description: middle(기본) 바른자세(중) 기준 / front 의자 앞쪽 / back 등받이까지 깊게 — front·back은
+          바른자세(중) 기준이 있을 때만 (없으면 409 NO_BASELINE)
       responses:
         '200':
           description: Successful Response
@@ -613,6 +629,16 @@ components:
           - type: 'null'
           title: Pose
           description: 부위 7개의 평균 좌표 [x, y, z, visibility] (0~1 비율, 영상 아님)
+        positions:
+          anyOf:
+          - additionalProperties:
+              items:
+                type: number
+              type: array
+            type: object
+          - type: 'null'
+          title: Positions
+          description: 앉은 위치별 채널별 압력 기준 {front, back}. 잰 위치만 들어 있음 (바른자세(중)은 pressure)
       type: object
       required:
       - state
@@ -1807,7 +1833,8 @@ components:
           - type: string
           - type: 'null'
           title: Kind
-          description: 측정 중이거나 마지막 측정의 종류 (initial / session / recalibration)
+          description: 측정 중이거나 마지막 측정의 종류 (initial / session / recalibration / position_front
+            / position_back)
         remaining_sec:
           anyOf:
           - type: number
@@ -1831,6 +1858,12 @@ components:
           - type: 'null'
           title: Measured At
           description: 지금 쓰는 기준을 잰 시각
+        positions_done:
+          items:
+            type: string
+          type: array
+          title: Positions Done
+          description: 앞·뒤 기준 중 잰 위치 (front / back). 바른자세(중) 기준을 다시 재면 비워짐
       type: object
       required:
       - state

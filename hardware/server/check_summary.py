@@ -21,7 +21,7 @@ from hardware.server.check_db import Env
 from hardware.server.check_session import KST, Checker, FakeTime
 from hardware.server.db import jobs as jobs_module
 from hardware.server.db.connection import connect
-from hardware.server.db.migrate import MIGRATIONS_DIR, migrate
+from hardware.server.db.migrate import MIGRATIONS_DIR, latest_version, migrate
 from hardware.server.db.summary import NUMERIC, check_values, compute_day, summarize, write_summary
 
 D, D1 = "2026-10-15", "2026-10-16"
@@ -241,7 +241,9 @@ def main() -> int:
         applied = migrate(c, db8)
         cols = [r[1] for r in c.execute("PRAGMA table_info(day_jobs)")]
         row = c.execute("SELECT summary_checked, needs_recompute FROM day_jobs").fetchone()
-        check("002 적용, 버전 2, .bak 백업", applied == [2] and c.execute("PRAGMA user_version").fetchone()[0] == 2
+        latest = latest_version()                      # 002 뒤에 만든 마이그레이션(003 이후)도 같이 적용됨
+        check("002~최신 적용, 최신 버전, .bak 백업", applied == list(range(2, latest + 1))
+              and c.execute("PRAGMA user_version").fetchone()[0] == latest
               and db8.with_suffix(".db.bak").exists(), applied)
         check("기존 줄 그대로 + needs_recompute 기본값 0", "needs_recompute" in cols and tuple(row) == (1, 0),
               tuple(row))

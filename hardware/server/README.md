@@ -77,7 +77,7 @@ python -m hardware.server.mock_server --export-openapi   # schemas.py를 고친 
 | GET | `/current` | 지금 자세 (홈 화면, 1초마다 호출) |
 | GET | `/history?seconds=60` | 최근 판단 기록 (1초에 1개, 최대 1시간) |
 | GET | `/baseline` | 기준(바른) 자세 측정값, 측정 중이면 남은 시간 |
-| POST | `/calibrate` | 기준 자세 측정 (앉으면 10초). 세션 없이(온보딩) 또는 세션 중(설정의 다시 측정) |
+| POST | `/calibrate` | 기준 자세 측정 (앉으면 10초). 세션 없이(온보딩) 또는 세션 중(설정의 다시 측정). `?position=front`/`back`이면 앉은 위치별(앞·뒤) 압력 기준만 추가로 잼 (바른자세(중) 기준이 먼저 있어야 함, 없으면 409 `NO_BASELINE`) |
 | GET | `/seating` | 지금 착석 구간 (자리 비움 5초 규칙), 지금 순간 normal / abnormal / unknown |
 | GET | `/seating/segments?hours=24` | 끝난 착석 구간 (시작·끝·종료 사유·첫 비정상까지 초·정상/비정상/unknown 초) |
 | POST | `/time/sync` | 앱 시각·시간대 보내기 `{"app_time": 1791207600.1, "timezone": "Asia/Seoul"}` |
@@ -127,6 +127,7 @@ python -m hardware.server.mock_server --export-openapi   # schemas.py를 고친 
 - **기준 자세:** 시작 버튼(`POST /session/start`)에 10초 측정이 들어 있다. 압력으로 앉은 게 확인되면 측정을 시작하고
   (서 있으면 대기, 측정 중 일어나면 다시 대기), 진행은 `GET /session`의 `baseline`으로 본다.
   처음이면 `initial`, 이후 세션은 `session`, `/calibrate`로 다시 재면 `recalibration`.
+  앉은 위치별 기준(선택, 좌면 ① 73→86%): 중 기준을 잰 뒤 `/calibrate?position=front` → `?position=back`을 각각 10초 (온보딩 +20초). 새 기준 행을 만들지 않고 현재 기준에 덧붙이며(`baselines.positions`), 진행·실패는 `/session`의 `baseline`(`kind`가 `position_front`/`position_back`, `positions_done`)으로 본다. 실패해도 기존 기준은 그대로이고 세션은 멈추지 않는다. 중 기준을 다시 재면 앞·뒤는 비워진다.
   `/calibrate`는 **세션 없이도** 받는다 (온보딩). 이때는 기준 자세만 재고 구간·원본 기록은 남기지 않는다
   (`baselines`에만 저장, 기준이 없으면 `initial`). 앉기를 기다리는 동안 `/baseline`의 `waiting_seat`가 true
   (`state`는 `measuring`). 일시정지 중에는 `409 NOT_RUNNING`.

@@ -28,6 +28,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from fastapi import FastAPI, HTTPException, Query
@@ -95,7 +96,7 @@ class MockRuntime:
                 self.current_baseline = BaselineValue(
                     created_at=b["measured_at"], seconds=b["seconds"] or 0.0, pressure=b["pressure"],
                     distance_mm=b["distance_mm"], pose=b["pose"], kind=b["kind"],
-                    chest_mm=b.get("chest_mm"))
+                    chest_mm=b.get("chest_mm"), positions=b.get("positions"))
         self.select(scenario, loop, seed)
 
     # --- 데이터 출처 (RealRuntime이 바꾼다) -------------------------------------
@@ -136,7 +137,7 @@ class MockRuntime:
             if old is not None:
                 self.engine.seating = old.seating
                 if old.measure is not None:
-                    self.engine.request_baseline(old.measure["kind"])
+                    self.engine.request_baseline(old.measure["kind"], old.measure.get("position"))
             if self.session.state is not SessionState.IDLE:
                 self.player.start(self.now())
         log.info("시나리오: %s (%s, %.0f초, %s)", name, scenario.description, scenario.total_sec,
@@ -148,6 +149,16 @@ class MockRuntime:
         self.player.hold(Step(seconds), ts + seconds)          # mock: 측정하는 동안 바른 자세로 앉음
 
     def _on_baseline(self, result: dict) -> None:
+        if result.get("position"):                      # 앞·뒤 기준: 바른자세(중) 기준에 덧붙임 (새 기준 행을 만들지 않음)
+            self.last_baseline_result = result
+            if result["status"] == "ok":
+                self.current_baseline = result["value"]
+                if self.recorder:
+                    self.recorder.save_positions(result["value"].positions)
+                log.info("앉은 위치 기준 측정 완료 (%s)", result["position"])
+            else:
+                log.warning("앉은 위치 기준 측정 실패 (%s, %s) → 기존 기준 유지", result["position"], result["fail_reason"])
+            return
         if self.recorder:
             self.recorder.save_baseline(result)         # 세션 없이 잰 것은 session_id 없이
         self.last_baseline_result = result
@@ -173,25 +184,30 @@ class MockRuntime:
         """기준 자세 측정 상태를 볼 엔진 (세션 없이 재는 중이면 측정용 엔진)"""
         return self.cal_engine if self.calibrating else self.engine
 
-    def calibrate(self) -> float:
+    def calibrate(self, position: str = "middle") -> float:
         """기준 자세 측정. 앉은 게 확인되면 10초 잰다
         - 세션 없음 (온보딩): 측정용 엔진으로 재기만 하고 구간·원본 기록은 남기지 않음 (baselines에만 저장)
         - 세션 실행 중 (설정의 다시 측정): 판단을 계속하면서 잰다
+        position: middle(기본) = 바른자세(중) 기준. front/back = 그 앉은 위치의 압력 기준만 추가로 잼
+                  (바른자세(중) 기준이 먼저 있어야 함. 앞·뒤를 안 재도 판단은 기준 1개로 동작)
         """
         with self.lock:
             ts = self.clock.now()
             if ts is None:
                 raise SessionError("CLOCK_NOT_SYNCED", "시각 동기화 전이라 측정할 수 없음. POST /time/sync를 먼저 보내세요")
-            kind = "recalibration" if self.current_baseline else "initial"
+            pos = None if position == "middle" else position
+            if pos is not None and self.current_baseline is None:
+                raise SessionError("NO_BASELINE", "바른자세(중) 기준 측정을 먼저 해야 앞·뒤 기준을 잴 수 있음")
+            kind = f"position_{pos}" if pos else ("recalibration" if self.current_baseline else "initial")
             if self.session.state is SessionState.RUNNING:
-                return self.engine.request_baseline(kind)
+                return self.engine.request_baseline(kind, pos)
             if self.session.state is SessionState.PAUSED:
                 raise SessionError("NOT_RUNNING", "일시정지 중에는 잴 수 없음. 재개한 뒤 다시 요청하세요")
             self.cal_engine = self._new_engine()
             self.player = self._new_player()
             self.player.start(ts)
             log.info("세션 없이 기준 자세 측정 (%s): 앉으면 시작", kind)
-            return self.cal_engine.request_baseline(kind)
+            return self.cal_engine.request_baseline(kind, pos)
 
     # --- 세션 ---------------------------------------------------------------
     def start_session(self) -> None:
@@ -295,6 +311,7 @@ class MockRuntime:
             "fail_reason": last["fail_reason"] if failed else None,
             "using_previous": failed and cur is not None,
             "measured_at": cur.created_at if cur else None,
+            "positions_done": sorted(cur.positions or {}) if cur else [],
         }
 
     def session_snapshot(self) -> dict:
@@ -512,15 +529,17 @@ def create_app(cfg: dict, scenario: str = "demo", loop: bool = True, seed: int |
                    "waiting_seat": e.measure is not None and e.measure["state"] == "waiting_seat"}
             if b:
                 out.update(created_at=b.created_at, seconds=b.seconds, pressure=b.pressure,
-                           distance_mm=b.distance_mm, pose=b.pose)
+                           distance_mm=b.distance_mm, pose=b.pose, positions=b.positions)
             return out
 
     @app.post("/calibrate", response_model=CalibrateResult, tags=["기준 자세"],
               summary="기준 자세 측정 (앉으면 10초). 세션 없이(온보딩) 또는 세션 중(설정의 다시 측정)",
               responses=ERRORS)
-    def calibrate():
+    def calibrate(position: Literal["front", "middle", "back"] = Query(
+            "middle", description="middle(기본) 바른자세(중) 기준 / front 의자 앞쪽 / back 등받이까지 깊게 — "
+                                  "front·back은 바른자세(중) 기준이 있을 때만 (없으면 409 NO_BASELINE)")):
         try:
-            return {"started": True, "seconds": runtime.calibrate()}
+            return {"started": True, "seconds": runtime.calibrate(position)}
         except SessionError as e:
             fail(409, e.code, str(e))
 

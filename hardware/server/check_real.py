@@ -123,6 +123,46 @@ def main() -> int:
         ok("엔진 신뢰도 전달", cur["confidence"]["seat"] > 0, cur["confidence"])
         ok("압력 중심 계산", cur["center_of_pressure"] is not None, cur["center_of_pressure"])
 
+        # 앉은 위치별(앞·뒤) 기준 측정 — 바른자세(중) 기준은 그대로 두고 위치 기준만 덧붙인다
+        mid_pressure = c.get("/baseline").json()["pressure"]
+        ok("앞·뒤 측정 전: positions 없음", c.get("/baseline").json()["positions"] is None
+           and c.get("/session").json()["baseline"]["positions_done"] == [], "없음")
+        r = c.post("/calibrate", params={"position": "front"})
+        ok("앞 기준 측정 요청 (세션 중)", r.status_code == 200 and r.json()["started"], r.status_code)
+        run(rt, ft, 13)
+        bl = c.get("/baseline").json()
+        ok("앞 기준 측정 완료, 중 기준은 그대로", list((bl["positions"] or {})) == ["front"]
+           and bl["pressure"] == mid_pressure, list(bl["positions"] or {}))
+        c.post("/calibrate", params={"position": "back"})
+        run(rt, ft, 13)
+        bl = c.get("/baseline").json()
+        sb = c.get("/session").json()["baseline"]
+        ok("뒤 기준 측정 완료 (앞·뒤 모두)", sorted(bl["positions"] or {}) == ["back", "front"]
+           and sb["positions_done"] == ["back", "front"] and sb["state"] == "ready",
+           (sorted(bl["positions"] or {}), sb["state"]))
+        ok("위치 기준은 채널 수만큼", all(len(v) == cfg["pressure"]["n_channels"] for v in bl["positions"].values()),
+           {k: len(v) for k, v in bl["positions"].items()})
+        saved = rt.recorder.current_baseline()
+        ok("DB에 앞·뒤 기준 저장", sorted(saved["positions"] or {}) == ["back", "front"],
+           sorted(saved["positions"] or {}))
+        ok("기준 행은 새로 안 생김 (중 기준 1개)",
+           rt.recorder.conn.execute("SELECT COUNT(*) FROM baselines").fetchone()[0] == 1, "1행")
+        c2, rt2 = build(cfg, ft, db=str(Path(tmp) / "real.db"))          # 서버를 다시 켜면 저장된 앞·뒤 기준으로 복원
+        ok("서버 재시작: 앞·뒤 기준이 AI 엔진까지 복원", sorted(rt2.current_baseline.positions or {}) == ["back", "front"]
+           and sorted(rt2.engine.ai.position_base) == ["back", "front"], sorted(rt2.engine.ai.position_base))
+        rt2.recorder.close(rt2.clock.now())
+        scaler = rt.gates["pressure"].inner                  # ScaledPressure: 압력을 약하게 해서 덜 앉은 상태 흉내
+        scaler.scale = 1
+        c.post("/calibrate", params={"position": "front"})
+        run(rt, ft, 13)
+        sb = c.get("/session").json()["baseline"]
+        ok("덜 눌리면 앞 기준 측정 실패 pressure_low, 기존 기준 유지",
+           sb["state"] == "failed" and sb["fail_reason"] == "pressure_low" and sb["using_previous"]
+           and sb["kind"] == "position_front" and sorted(c.get("/baseline").json()["positions"]) == ["back", "front"]
+           and c.get("/session").json()["state"] == "running", (sb["state"], sb["fail_reason"], sb["kind"]))
+        scaler.scale = ScaledPressure.SCALE
+        run(rt, ft, 4)
+
         # 자리 비움
         inner_p.label, inner_p.noise = "empty", 2.0      # 빈 의자: 가짜 압력 잡음을 작게 (12비트에서 잡음 20이면 합이 50을 넘음)
         run(rt, ft, 4)                          # 상태는 3초 유지돼야 확정
@@ -198,6 +238,9 @@ def main() -> int:
        and s["baseline"]["fail_reason"] == "pressure_low", (s["baseline"]["state"], s["baseline"]["fail_reason"]))
     ok("성공한 기준이 없으면 세션 정지", s["state"] == "idle" and s["end_reason"] is None or s["state"] == "idle",
        (s["state"], s["end_reason"]))
+    r = c.post("/calibrate", params={"position": "back"})
+    ok("중 기준이 없으면 앞·뒤 측정 거부 409 NO_BASELINE", r.status_code == 409 and "NO_BASELINE" in r.text,
+       (r.status_code, r.text[:60]))
 
     bad = [r for r in ok.rows if not r[0]]
     print(f"\n{len(ok.rows) - len(bad)}/{len(ok.rows)} 통과")

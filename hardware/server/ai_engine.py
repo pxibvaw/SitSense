@@ -46,7 +46,8 @@ class AiEngine(MockEngine):
         self.filters = {k: PassThroughFilter() for k in ("seat", "head", "tilt")}
         self._r = None
         if baseline is not None:                    # 저장된 기준으로 시작 (서버 재시작 등)
-            self.ai.restore(baseline.pressure, baseline.distance_mm, baseline.pose, chest_mm=baseline.chest_mm)
+            self.ai.restore(baseline.pressure, baseline.distance_mm, baseline.pose, chest_mm=baseline.chest_mm,
+                            positions=baseline.positions)
 
     # --- 기준 자세 ----------------------------------------------------------
     def on_calibrate(self, samples):
@@ -54,6 +55,15 @@ class AiEngine(MockEngine):
         if not res.ok:
             log.warning("AI 기준 측정 실패: %s (%s)", res.reason, res.message)
         return res.reason
+
+    def on_calibrate_position(self, position, samples):
+        res = self.ai.calibrate_position(position, samples)
+        if not res.ok:
+            log.warning("AI 앉은 위치(%s) 기준 측정 실패: %s (%s)", position, res.reason, res.message)
+        return res.reason
+
+    def position_value(self, position, samples):
+        return list(self.ai.position_base[position])
 
     # --- 판단 ---------------------------------------------------------------
     def update(self, sample: Sample, step: Step) -> dict:

@@ -167,7 +167,22 @@ class Recorder:
             return None
         return {"id": r["id"], "kind": r["kind"], "measured_at": r["measured_at"], "seconds": r["seconds"],
                 "pressure": pressure, "distance_mm": r["distance_mm"],
-                "pose": json.loads(r["pose"]) if r["pose"] else None, "chest_mm": r["chest_mm"]}
+                "pose": json.loads(r["pose"]) if r["pose"] else None, "chest_mm": r["chest_mm"],
+                "positions": self._positions(r)}
+
+    def _positions(self, r) -> dict | None:
+        """저장된 앞·뒤 기준 (채널 수가 지금과 다른 것은 버림)"""
+        if not r["positions"]:
+            return None
+        pos = {k: v for k, v in json.loads(r["positions"]).items() if len(v) == self.n_channels}
+        return pos or None
+
+    def save_positions(self, positions: dict) -> None:
+        """현재 기준 행에 앉은 위치별(앞·뒤) 압력 기준을 덮어쓴다 (새 기준 행을 만들지 않음)"""
+        def w(c):
+            c.execute("UPDATE baselines SET positions = ? WHERE is_current = 1", (_json(positions),))
+            self._set_last_seen(c, self.clock.now())
+        self._tx(w)
 
     # --- 세션 · 기준 자세 (즉시) ------------------------------------------------
     def session_started(self, sid: str, ts: float, settings: dict) -> None:
@@ -221,12 +236,12 @@ class Recorder:
                 c.execute("UPDATE baselines SET is_current = 0 WHERE id = ?", (prev["id"],))
             out["id"] = c.execute(
                 "INSERT INTO baselines (kind, status, fail_reason, measured_at, session_id, seconds, layout_id, "
-                "pressure, distance_mm, pose, based_on_id, is_current, chest_mm) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "pressure, distance_mm, pose, based_on_id, is_current, chest_mm, positions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (result["kind"], result["status"], result.get("fail_reason"), result["measured_at"],
                  self.session_id, result.get("seconds"), self.layout_id,
                  _json(v.pressure) if v else None, v.distance_mm if v else None,
                  _json(v.pose) if v and v.pose else None, prev["id"] if prev else None, int(ok),
-                 v.chest_mm if v else None)).lastrowid
+                 v.chest_mm if v else None, _json(v.positions) if v and v.positions else None)).lastrowid
             self._set_last_seen(c, result["measured_at"])
         self._tx(w)
         return out["id"]

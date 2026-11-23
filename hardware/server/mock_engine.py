@@ -13,7 +13,7 @@ AI 코드는 import하지 않는다 (hardware 브랜치에 아직 없음, 수정
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -73,6 +73,7 @@ class BaselineValue:
     pose: dict[str, list[float]] | None
     kind: str = "initial"           # initial / session / recalibration / adjusted
     chest_mm: float | None = None   # 기준 가슴 거리 중앙값 (가슴 센서 없음·측정 부족이면 None)
+    positions: dict[str, list[float]] | None = None   # 앉은 위치별 압력 기준 {"front": [...], "back": [...]} (없으면 None)
 
 
 # 기준 자세 측정 품질 (⚠️ 임시값 — 실물로 조정)
@@ -118,9 +119,10 @@ class MockEngine:
         self.seating = SeatingTracker(cfg)
 
     # --- 기준 자세 ----------------------------------------------------------
-    def request_baseline(self, kind: str) -> float:
-        """기준 자세 측정 요청. 앉은 게 확인되면(착석 구간 안) 측정을 시작한다. 측정 시간(초)을 돌려준다"""
-        self.measure = {"kind": kind, "state": "waiting_seat", "start": None, "until": None}
+    def request_baseline(self, kind: str, position: str | None = None) -> float:
+        """기준 자세 측정 요청. 앉은 게 확인되면(착석 구간 안) 측정을 시작한다. 측정 시간(초)을 돌려준다
+        position: "front"/"back"이면 바른자세(중) 기준은 그대로 두고 그 앉은 위치의 압력 기준만 잰다 (kind는 position_front 등)"""
+        self.measure = {"kind": kind, "position": position, "state": "waiting_seat", "start": None, "until": None}
         self._buf = []
         return self.baseline_seconds
 
@@ -162,7 +164,38 @@ class MockEngine:
         if sample.ts >= m["until"]:
             self._finish_baseline(sample.ts)
 
+    def _finish_position(self, ts: float) -> None:
+        """앉은 위치(앞·뒤) 기준 측정 끝. 실패해도 바른자세(중) 기준과 이미 잰 다른 위치 기준은 그대로"""
+        m, buf = self.measure, self._buf
+        position = m["position"]
+        totals = np.array([sum(s.pressure.values) for s in buf], dtype=float)
+        reason = None
+        if self.baseline is None:
+            reason = "no_baseline"
+        elif len(buf) == 0 or totals.std() / max(totals.mean(), 1.0) > BASELINE_MAX_PRESSURE_CV:
+            reason = "too_much_motion"
+        else:
+            reason = self.on_calibrate_position(position, buf)
+        result = {"kind": m["kind"], "position": position, "status": "ok" if reason is None else "failed",
+                  "fail_reason": reason, "measured_at": ts, "seconds": round(ts - m["start"], 1), "value": None}
+        if reason is None:
+            positions = {**(self.baseline.positions or {}), position: self.position_value(position, buf)}
+            self.baseline = result["value"] = replace(self.baseline, positions=positions)
+        self.measure, self._buf, self.last_result = None, [], result
+        if self.on_baseline:
+            self.on_baseline(result)
+
+    def on_calibrate_position(self, position: str, samples: list[Sample]) -> str | None:
+        """앉은 위치 기준 품질 검사를 통과한 뒤 부른다. 실패 이유를 돌려주면 측정 실패 (mock은 항상 통과)"""
+        return None
+
+    def position_value(self, position: str, samples: list[Sample]) -> list[float]:
+        """그 위치의 채널별 압력 기준 (config.yaml 채널 순서). real 모드는 AI 엔진 값을 쓴다"""
+        return [round(float(v), 1) for v in np.mean([s.pressure.values for s in samples], axis=0)]
+
     def _finish_baseline(self, ts: float) -> None:
+        if self.measure.get("position"):
+            return self._finish_position(ts)
         m, buf = self.measure, self._buf
         n = len(buf)
         totals = np.array([sum(s.pressure.values) for s in buf], dtype=float)
@@ -189,7 +222,7 @@ class MockEngine:
             self.baseline = result["value"] = BaselineValue(
                 created_at=ts, seconds=result["seconds"], pressure=[round(float(v), 1) for v in p],
                 distance_mm=float(np.median(dists)), pose=pose, kind=m["kind"],
-                chest_mm=float(np.median(chests)) if len(chests) >= BASELINE_MIN_DISTANCE_RATIO * n else None)
+                chest_mm=float(np.median(chests)) if len(chests) >= BASELINE_MIN_DISTANCE_RATIO * n else None)   # 앞·뒤 기준은 새로 잼
         self.measure, self._buf, self.last_result = None, [], result     # 실패면 이전 기준(self.baseline) 유지
         if self.on_baseline:
             self.on_baseline(result)
