@@ -144,7 +144,7 @@ python -m hardware.server.mock_server --export-openapi   # schemas.py를 고친 
 | code | HTTP | 언제 |
 |---|---|---|
 | `CLOCK_NOT_SYNCED` | 409 | 동기화 전에 세션 시작 / 기준 자세 측정 |
-| `CLOCK_BACKWARD` | 409 | 다시 동기화했는데 시각이 0.5초 넘게 뒤로 감 (0.5초 이내는 200 `applied: false`, 시각 그대로) |
+| `CLOCK_BACKWARD` | 409 | 다시 동기화했는데 시각이 2초 넘게 뒤로 감 (2초 이내는 200 `applied: false`, 시각 그대로) |
 | `CLOCK_JUMP_IN_SESSION` | 409 | 측정 중 다시 동기화했는데 2초 넘게 앞으로 감 (정지한 뒤 보내면 됨) |
 | `CLOCK_BEFORE_LAST_RECORD` | 409 | 서버를 켠 뒤 첫 동기화가 DB의 마지막 기록보다 이전 (`detail.last_record_at`) — 아래 복구 |
 | `SESSION_ACTIVE` | 409 | 세션이 있는데 또 시작 |

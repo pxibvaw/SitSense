@@ -2110,7 +2110,7 @@ components:
           - type: boolean
           - type: 'null'
           title: Applied
-          description: 이번 동기화를 적용했는지. 0.5초 이내로 뒤로 가는 변경은 false(시각 그대로). 조회에서는 null
+          description: 이번 동기화를 적용했는지. 2초 이내로 뒤로 가는 변경은 false(시각 그대로). 조회에서는 null
         message:
           anyOf:
           - type: string

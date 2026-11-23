@@ -226,7 +226,7 @@ class TimeStatus(BaseModel):
     offset_change_sec: float | None = Field(
         None, description="다시 동기화했을 때 시각이 바뀐 양 (초). 첫 동기화·조회에서는 null")
     applied: bool | None = Field(
-        None, description="이번 동기화를 적용했는지. 0.5초 이내로 뒤로 가는 변경은 false(시각 그대로). 조회에서는 null")
+        None, description="이번 동기화를 적용했는지. 2초 이내로 뒤로 가는 변경은 false(시각 그대로). 조회에서는 null")
     message: str | None = None
 
 

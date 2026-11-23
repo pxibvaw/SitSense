@@ -4,8 +4,8 @@
 
 - 앱이 POST /time/sync로 현재 시각과 시간대(Asia/Seoul 고정)를 보내면 offset을 정한다.
 - 다시 동기화할 때 (변화량 = 직전 동기화 대비, 한 번 바뀌는 양만 본다)
-    뒤로 0.5초 이내        → 적용하지 않음 (applied=false, 네트워크 지연 오차)
-    뒤로 0.5초 넘게        → 거절 CLOCK_BACKWARD (세션 안팎 모두)
+    뒤로 2초 이내          → 적용하지 않음 (applied=false, 네트워크 지연 오차)
+    뒤로 2초 넘게          → 거절 CLOCK_BACKWARD (세션 안팎 모두)
     세션 중 2초 넘게 앞으로 → 거절 CLOCK_JUMP_IN_SESSION
 - offset은 메모리에만 있다. Pi가 재부팅되거나 서버가 다시 켜지면 사라지고 boot_id가 바뀐다
   → 앱은 boot_id가 달라졌거나 synced=false면 다시 보내야 한다.
@@ -24,7 +24,7 @@ log = logging.getLogger("sitsense.clock")
 
 MIN_APP_TIME = datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()   # 이보다 이전 시각은 잘못된 값
 MAX_APP_TIME = datetime(2100, 1, 1, tzinfo=timezone.utc).timestamp()
-BACKWARD_TOLERANCE_SEC = 0.5    # 이 안쪽으로 뒤로 가는 변경은 오류 대신 '적용 안 함'
+BACKWARD_TOLERANCE_SEC = 2.0    # 이 안쪽으로 뒤로 가는 변경은 오류 대신 '적용 안 함' (와이파이 지연이 들쭉날쭉해도 시작이 막히지 않게)
 SESSION_MAX_JUMP_SEC = 2.0      # 세션 중 앞으로 갈 수 있는 최대 변화
 TIMEZONE = "Asia/Seoul"         # 시간대 고정 (hardware/docs/db_design.md 결정 10)
 FIXED_ZONES = {TIMEZONE: timezone(timedelta(hours=9), "KST")}   # zoneinfo 데이터가 없을 때 (서머타임 없음)
