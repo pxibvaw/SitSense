@@ -1,4 +1,4 @@
-"""상체 판단 — 기준 자세 대비 변화로 거북목·좌우 기울기 판단 (규칙 방식 초안)
+"""상체 판단 — 기준 자세 대비 변화로 거북목·좌우 기울기 판단 (규칙 방식, 기준은 docs/upper_body_rules.md)
 
 흐름
     0. FeatureSmoother: 최근 smooth_sec초 특징의 중앙값 (점 떨림 완화, 특히 눈 선 각도)
@@ -7,8 +7,16 @@
     2. judge(): 지금 특징 − 기준 특징이 threshold를 넘으면 나쁜 자세
     3. StateFilter: 같은 상태가 short_filter_sec 이상 유지돼야 상태를 바꿈 (깜빡임 방지)
 
-기준값(threshold)은 config.yaml의 upper_rules에 있고, 전부 임시값이다.
-웹캠으로 직접 앉아서 조정하고, 데이터를 모은 뒤 분포를 보고 다시 정한다.
+거북목 (2026-11-22, 기준은 docs/judgement_rules.md 1절)
+    판정은 카메라: ① 목 높이 감소 ② 얼굴 커짐 중 1개 이상이면 거북목 (확신도 1개 0.6 · 2개 0.8)
+    거리센서 2개는 거북목일 때 확신도만 올림 (+0.15씩, 최대 0.95). 혼자 판정하거나 카메라 판정을 뒤집지 않음
+        A. 머리 내밀기: 머리가 assist_head_mm 이상 가까워짐 + 가슴은 assist_chest_mm 미만 가까워짐
+        B. 어깨 말림:   가슴이 assist_chest_mm 이상 멀어짐 + 머리는 ±assist_head_mm 안
+        상체 숙임·기댐(머리·가슴이 같이 움직임)은 보조 없음
+        가슴 거리가 없거나 막혔으면(chest_min_mm 미만) 예전 방식: 머리가 close_delta_mm 이상 가까우면 +0.15
+    5cm·3cm = 2차 11명 바른자세 중 2초 중앙값의 자연 흔들림(95%: 머리 3.4cm, 가슴 2.5cm)보다 크게
+
+카메라 기준값(12%·8%·기울기)은 팀 테스트 경험값 (거북목 수집 데이터로 확인 예정).
 """
 from __future__ import annotations
 
@@ -29,7 +37,10 @@ class UpperRules:
     min_visibility: float = 0.5        # 이보다 안 보이는 점이 있으면 판단하지 않음
     neck_drop_ratio: float = 0.12      # 목 높이 비율이 기준보다 12% 이상 줄면 거북목 단서
     face_grow_ratio: float = 0.08      # 얼굴 크기 비율이 기준보다 8% 이상 커지면 거북목 단서
-    close_delta_mm: float = 100.0      # 화면 거리가 기준보다 10cm 이상 가까워지면 거북목 단서 (거리센서)
+    close_delta_mm: float = 100.0      # 머리 거리가 기준보다 10cm 이상 가까워지면 (가슴 거리가 없을 때만, 확신도 보조)
+    assist_head_mm: float = 50.0       # 거리 보조: 머리 변화 기준 5cm (자연 흔들림 3.4cm보다 크게)
+    assist_chest_mm: float = 30.0      # 거리 보조: 가슴 변화 기준 3cm (자연 흔들림 2.5cm보다 크게)
+    chest_min_mm: float = 50.0         # 가슴 거리가 이보다 짧으면(0 포함) 측정 실패로 보고 쓰지 않음
     shoulder_angle_deg: float = 5.0    # 어깨 선이 기준보다 5도 이상 기울면
     head_angle_deg: float = 7.0        # 눈 선이 기준보다 7도 이상 기울면
     head_offset: float = 0.10          # 코가 기준보다 어깨 너비의 10% 이상 옆으로 가면
@@ -91,8 +102,10 @@ class Baseline:
     _t0: float | None = None
     _samples: list[UpperFeatures] = field(default_factory=list)
     _distances: list[float] = field(default_factory=list)
+    _chests: list[float] = field(default_factory=list)
     value: UpperFeatures | None = None
-    distance_mm: float | None = None
+    distance_mm: float | None = None   # 기준 머리 거리
+    chest_mm: float | None = None      # 기준 가슴 거리 (가슴 센서가 없거나 막혔으면 None)
 
     @property
     def ready(self) -> bool:
@@ -101,7 +114,8 @@ class Baseline:
     def remaining(self, ts: float) -> float:
         return self.seconds if self._t0 is None else max(0.0, self.seconds - (ts - self._t0))
 
-    def add(self, feat: UpperFeatures | None, ts: float, distance_mm: float | None = None) -> bool:
+    def add(self, feat: UpperFeatures | None, ts: float, distance_mm: float | None = None,
+            chest_mm: float | None = None) -> bool:
         """기준 측정 중이면 샘플을 더하고, 기준이 완성되면 True"""
         if self.ready:
             return True
@@ -111,11 +125,14 @@ class Baseline:
             self._samples.append(feat)
         if distance_mm is not None:
             self._distances.append(distance_mm)
+        if chest_mm is not None:
+            self._chests.append(chest_mm)
         if ts - self._t0 >= self.seconds and len(self._samples) >= self.min_samples:
             keys = [f.name for f in fields(UpperFeatures)]
             med = {k: float(np.median([getattr(s, k) for s in self._samples])) for k in keys}
             self.value = UpperFeatures(**med)
             self.distance_mm = float(np.median(self._distances)) if self._distances else None
+            self.chest_mm = float(np.median(self._chests)) if self._chests else None
         return self.ready
 
     @property
@@ -123,9 +140,10 @@ class Baseline:
         return len(self._samples)
 
     def reset(self) -> None:
-        self._t0, self.value, self.distance_mm = None, None, None
+        self._t0, self.value, self.distance_mm, self.chest_mm = None, None, None, None
         self._samples.clear()
         self._distances.clear()
+        self._chests.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -149,14 +167,36 @@ def unknown_judgement() -> UpperJudgement:
     return UpperJudgement(HeadState.UNKNOWN, TiltState.UNKNOWN, 0.0, 0.0, {}, {})
 
 
+def distance_assist(base: Baseline, rules: UpperRules, distance_mm: float | None,
+                    chest_mm: float | None) -> tuple[str | None, dict[str, float]]:
+    """거북목 확신도 보조. ('head_only' | 'chest_back' | 'closer' | None, 변화량)
+    head_only  = A. 머리만 가까워짐 / chest_back = B. 가슴만 뒤로 / closer = 가슴 센서 없을 때 예전 방식"""
+    deltas: dict[str, float] = {}
+    if distance_mm is None or base.distance_mm is None:
+        return None, deltas
+    closer = base.distance_mm - distance_mm                      # + = 머리가 가까워짐
+    deltas["closer_mm"] = closer
+    ok = lambda v: v is not None and v >= rules.chest_min_mm      # noqa: E731
+    if not (ok(chest_mm) and ok(base.chest_mm)):
+        return ("closer" if closer >= rules.close_delta_mm else None), deltas
+    chest_back = chest_mm - base.chest_mm                        # + = 가슴이 멀어짐
+    deltas["chest_back_mm"] = chest_back
+    if closer >= rules.assist_head_mm and -chest_back < rules.assist_chest_mm:
+        return "head_only", deltas
+    if chest_back >= rules.assist_chest_mm and abs(closer) < rules.assist_head_mm:
+        return "chest_back", deltas
+    return None, deltas
+
+
 def judge(feat: UpperFeatures | None, base: Baseline, rules: UpperRules,
-          distance_mm: float | None = None) -> UpperJudgement:
-    """지금 특징을 기준 자세와 비교. 판단 불가(사람 없음, 기준 없음)면 UNKNOWN"""
+          distance_mm: float | None = None, chest_mm: float | None = None) -> UpperJudgement:
+    """지금 특징을 기준 자세와 비교. 판단 불가(사람 없음, 기준 없음)면 UNKNOWN
+    distance_mm = 머리 거리, chest_mm = 가슴 거리 (없으면 None)"""
     if feat is None or not base.ready:
         return unknown_judgement()
     b = base.value
 
-    # --- 거북목: 목 높이 ↓, 얼굴 크기 ↑, (거리센서) 화면에 가까워짐 ---
+    # --- 거북목: 카메라(목 높이 ↓, 얼굴 크기 ↑)가 판정, 거리센서 2개는 확신도 보조 ---
     neck_drop = (b.neck_height - feat.neck_height) / b.neck_height if b.neck_height > 0 else 0.0
     face_grow = feat.face_ratio / b.face_ratio - 1 if b.face_ratio > 0 else 0.0
     cues = {
@@ -164,18 +204,17 @@ def judge(feat: UpperFeatures | None, base: Baseline, rules: UpperRules,
         "face_grow": face_grow >= rules.face_grow_ratio,
     }
     deltas = {"neck_drop": neck_drop, "face_grow": face_grow}
-    if distance_mm is not None and base.distance_mm is not None:
-        closer = base.distance_mm - distance_mm
-        deltas["closer_mm"] = closer
-        cues["closer"] = closer >= rules.close_delta_mm
+    assist, dist_deltas = distance_assist(base, rules, distance_mm, chest_mm)
+    deltas.update(dist_deltas)
+    cues.update({k: assist == k for k in ("head_only", "chest_back", "closer")})
 
     cam_hits = cues["neck_drop"] + cues["face_grow"]
     if cam_hits == 0:
-        # 카메라 단서가 없으면 거리만 가까워도 거북목은 아님 (상체 전체를 숙였거나 의자를 당김)
+        # 카메라 단서가 없으면 거리만 변해도 거북목 아님 (의자를 당기거나 숙였을 수 있음)
         head, head_conf = HeadState.NORMAL, 0.8
     else:
         head = HeadState.FORWARD
-        head_conf = {1: 0.6, 2: 0.8}[cam_hits] + (0.15 if cues.get("closer") else 0.0)
+        head_conf = min({1: 0.6, 2: 0.8}[cam_hits] + (0.15 if assist else 0.0), 0.95)
 
     # --- 좌우 기울기: 어깨 선, 눈 선, 코 좌우 위치 (+ 왼쪽 / - 오른쪽) ---
     scores = {

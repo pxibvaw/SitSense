@@ -30,6 +30,7 @@ data/raw/*
 data/synthetic/*
 data/processed/*
 !data/**/.gitkeep
+data/dataset/*.csv
 
 # ===== 모델: 최종 모델(final_ 로 시작)만 올림 =====
 ai/models/*

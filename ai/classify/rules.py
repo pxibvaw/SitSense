@@ -5,8 +5,6 @@
 """
 from __future__ import annotations
 
-import itertools
-
 import numpy as np
 
 
@@ -45,12 +43,20 @@ class ThresholdRule:
     def fit(self, F, y):
         """학습 데이터 정확도가 가장 높은 (t1, t2)를 후보 격자에서 찾는다"""
         y = np.asarray(y)
-        best = (-1, None)
-        for t1, t2 in itertools.product(self.T1_GRID, self.T2_GRID):
-            acc = (self._predict(F, t1, t2) == y).mean()
-            if acc > best[0]:
-                best = (acc, (t1, t2))
-        self.t1, self.t2 = (float(v) for v in best[1])
+        front = F["LR_front"].to_numpy()
+        side = self._side(F)
+        # 후보 격자 전체를 한 번에 계산 (반복문보다 수백 배 빠름, 결과는 같음: 가장 먼저 나온 최고값)
+        T2 = self.T2_GRID[None, :]
+        y_ll, y_lr, y_n = (y == "lean_left")[:, None], (y == "lean_right")[:, None], (y == "normal")[:, None]
+        side_hit = np.where(side[:, None] > T2, y_ll, np.where(side[:, None] < -T2, y_lr, y_n))   # (n, t2)
+        acc = np.empty((len(self.T1_GRID), len(self.T2_GRID)))
+        for i, t1 in enumerate(self.T1_GRID):
+            cl, cr = front < -t1, front > t1
+            cross_hit = (cl & (y == "cross_left")) | (cr & (y == "cross_right"))
+            rest = ~(cl | cr)
+            acc[i] = (cross_hit.sum() + side_hit[rest].sum(axis=0)) / len(y)
+        i, j = np.unravel_index(np.argmax(acc), acc.shape)
+        self.t1, self.t2 = float(self.T1_GRID[i]), float(self.T2_GRID[j])
         self.at_edge = [name for name, v, grid in (("t1", self.t1, self.T1_GRID), ("t2", self.t2, self.T2_GRID))
                         if v in (grid[0], grid[-1]) and not (name == "t2" and v == 0.0)]
         return self

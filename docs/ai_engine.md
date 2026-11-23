@@ -8,11 +8,12 @@
 | 파일 | 하는 일 |
 |---|---|
 | `ai/engine/sitsense_engine.py` | **AI 엔진.** `Sample` 하나 → 좌면·목·기울기·화면 거리 판정 (서버 `/current` 필드와 같은 이름) |
-| `ai/engine/seat.py` | 좌면 판정기 (학습한 RF 모델 + 후처리). 엔진이 안에서 씀 |
+| `ai/engine/seat.py` | 좌면 판정기. 기본 = 단계별(`StagedSeatClassifier`: ① 바른/나쁜 → ② 편향/다리꼬기 → ③ 체중 쪽). 엔진이 안에서 씀 |
 | `ai/engine/upper_body.py` | 목·기울기 규칙 판정. 엔진이 안에서 씀 |
 | `ai/camera/pose_source.py` | **카메라 부품.** Pi 카메라 + MediaPipe를 뒤에서 돌리고 가장 최근 상체 점을 줌 (`PoseSource`, 전원 켜기/끄기) |
-| `ai/models/final_seat_model.joblib` | 학습한 좌면 모델 (RF, 유지 4초·확신도 0.7·평균 2초 포함) |
-| `ai/engine/check_engine.py` | 엔진 자동 점검 `python -m ai.engine.check_engine` (10개) |
+| `ai/models/final_staged_seat_model.joblib` | **좌면 모델 (기본).** 2차 11명 단계별 RF 3개 × 2벌(기준 1개 / 앉은 위치별 기준), 유지 4초·평균 2초·확신도 0.5. `python -m ai.classify.train_staged`로 다시 만듦 |
+| `ai/models/final_seat_model.joblib` | 예전 좌면 모델 (1차 3명, 5개 자세 한 번에). 파일을 넘기면 예전 방식으로 동작 |
+| `ai/engine/check_engine.py` | 엔진 자동 점검 `python -m ai.engine.check_engine` (12개) |
 
 ## 시간 기준 (세 센서 공통, `config.yaml`)
 
@@ -97,3 +98,26 @@ hub = SensorHub(pressure, distance, pose_src, n_channels=6, adc_max=4095)
 - Pi 준비는 `docs/pi_camera_collect.md`와 같다 (`python3-picamera2`, `--system-site-packages` 가상환경).
 - 카메라를 거꾸로 달았으면 `from_config(cfg, camera="picam", rotate180=True)`. 좌우 반전은 하지 않는다 (왼쪽·오른쪽이 바뀜).
 - 카메라 결과가 1.5초보다 오래되면 엔진이 목·기울기를 `unknown`으로 둔다.
+
+## 좌면 결과 (단계별 모델, 2026-11-22)
+
+`seat_state`는 **예전과 같은 5개 자세 값**(normal / lean_left / lean_right / cross_left / cross_right / empty / unknown)이라 서버·앱은 그대로 동작한다. 아래 필드가 추가됐다 (`EngineResult`, 기본값이 있어서 안 써도 됨).
+
+| 필드 | 값 | 앱 표시 |
+|---|---|---|
+| `seat_side` | `left` / `right` / `None` | 체중이 실린 쪽 — **확정** 표시 (③ 77%) |
+| `seat_kind_confidence` | 0~1 | 편향인지 다리 꼬기인지는 **"추정"** 표시 (② 60%) |
+| `sit_position` | `front` / `middle` / `back` / `unknown` | 머리 거리로 추정한 앉은 위치 (선택) |
+| `seat_baseline_mode` | `single` / `depth` | 기준 1개 / 앉은 위치별 기준 (디버깅용) |
+
+**앉은 위치별 기준 (선택, ① 73% → 86%)** — 서버가 기준 측정 때 두 번 더 재면 자동으로 좋아진다.
+
+```python
+engine.calibrate(samples)                    # 지금처럼 바른자세(중) 10초
+engine.calibrate_position("front", samples)  # 의자 앞쪽에 바르게 앉아 10초
+engine.calibrate_position("back", samples)   # 등받이까지 깊게 바르게 앉아 10초
+engine.position_base                         # {"front": [...], "back": [...]} → 기준과 같이 저장
+engine.restore(b.pressure, b.distance_mm, b.pose, positions=저장한_position_base)
+```
+
+**기준 측정 실패 조건이 바뀜:** 예전 "6개 센서 전부 최대치의 25% 이상" → **"25% 이상 눌린 센서 3개 이상, 왼쪽·오른쪽 하나씩 포함"**. 2차 수집 11명은 바르게 앉아도 1~3개 센서가 덜 눌려서, 예전 조건이면 8명이 기준 측정에 실패했다.

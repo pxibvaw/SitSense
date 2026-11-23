@@ -5,13 +5,15 @@
 
 점검 항목
     설정      config.yaml 압력 채널 순서 == 모델 채널 순서
-    좌면      수집 데이터를 엔진에 넣은 결과 == 좌면 판정기(seat.py)에 직접 넣은 결과 (사람 3명)
+    좌면      수집 데이터를 엔진에 넣은 결과 == 좌면 판정기(seat.py)에 직접 넣은 결과 (1차 사람 3명, 단계별 모델)
               같은 데이터를 0.1초 간격(서버 mock 속도)으로 넣어도 결과가 같음 (0.5초마다 한 번만 판정)
     상체      하드웨어 mock 시나리오(압력은 실제 크기로 키움)(바른 자세·거북목·왼쪽/오른쪽 기울기)를 서버처럼 10Hz로 재생 → 목·기울기 정답
               자리 비움 → 좌면 empty, 목·기울기 unknown / 카메라 끊김 → 목·기울기 unknown, 오류 없음
     기준 자세  덜 눌린 센서 → pressure_low, 사람 없음 → no_person, 실패하면 이전 기준 유지
               서버에 저장된 기준 형식(BaselineValue)으로 복원 → 같은 판정
     입력      이상한 압력 값(NaN)이 와도 멈추지 않고 직전 상태 유지, 결과는 JSON으로 저장 가능
+    단계별    앉은 위치별 기준(앞·중·뒤) → depth 모델, 결과는 기존 5개 자세 값, 저장 기준으로 복원 (2차 데이터)
+    거북목    카메라 판정 + 거리센서 보조(A 머리만 / B 가슴만 뒤로), 숙임·의자 당김은 보조 없음, 가슴 막힘 대체
     카메라    CameraPoseSource 켜기(warming → on)·최근 결과·끄기·오류 (가짜 카메라로)
 """
 from __future__ import annotations
@@ -49,7 +51,7 @@ def check(name: str):
 def main() -> int:
     logging.basicConfig(level=logging.ERROR)
     from ai.camera.pose_source import CameraPoseSource
-    from ai.engine.seat import SeatClassifier
+    from ai.engine.seat import MODEL_PATH, load_seat_classifier
     from ai.engine.sitsense_engine import SitSenseEngine, channel_names_from_positions
     from ai.features.pressure_pipeline import (
         ADC_MAX, BASELINE_CLS, BASELINE_DEPTH, BASELINE_MIN_FRAC, BASELINE_SAMPLES, MovementParams,
@@ -63,49 +65,58 @@ def main() -> int:
     from hardware.mock.scenarios import get_scenario
 
     cfg = load_config()
-    model_path = repo_path("ai/models/final_seat_model.joblib")
+    model_path = repo_path(MODEL_PATH)        # 단계별 모델 (2차 11명)
 
     def sample(ts, pressure, dist_mm=None, pose=None):
         d = DistanceReading(ts, int(dist_mm), 0) if dist_mm is not None else DistanceReading.failed(ts)
         return Sample(ts=ts, pressure=PressureReading(ts, [int(v) for v in pressure]), distance=d, pose=pose)
 
-    @check("설정: config.yaml 압력 채널 순서 == 모델 채널 순서")
+    cfg_names = channel_names_from_positions(cfg["pressure"]["positions"])   # 서버가 값을 주는 순서
+
+    @check("설정: config.yaml 센서 위치 == 지금 방석(collect_all1117) 배치, 모델과 같은 센서")
     def _():
-        names = channel_names_from_positions(cfg["pressure"]["positions"])
-        model = SeatClassifier(model_path).channels
-        assert names == model, f"config {names} / 모델 {model}"
-        return " ".join(names)
+        # 지금 방석: CH0 맨 앞 왼쪽, CH1 맨 뒤 왼쪽, CH3 중간 왼쪽, CH4 맨 뒤 오른쪽, CH6 중간 오른쪽, CH7 맨 앞 오른쪽
+        want = ["L_front", "L_back", "L_mid", "R_back", "R_mid", "R_front"]
+        assert cfg["pressure"]["channels"] == [0, 1, 3, 4, 6, 7], cfg["pressure"]["channels"]
+        assert cfg_names == want, f"config {cfg_names} / 방석 {want}"
+        model = load_seat_classifier(model_path).channels
+        assert sorted(cfg_names) == sorted(model), f"config {cfg_names} / 모델 {model}"
+        return " ".join(cfg_names) + f"  (모델 순서 {' '.join(model)} → 엔진이 이름으로 맞춤)"
 
     # ------------------------------------------------------------------ 좌면 (수집 데이터)
     df, _ = load_folder(repo_path("data/raw/pressure"))
-    seat_ch = SeatClassifier(model_path).channels
-    bundle_mv = MovementParams(**SeatClassifier(model_path).bundle["movement"])
+    _seat0 = load_seat_classifier(model_path)
+    seat_ch = _seat0.channels
+    bundle_mv = MovementParams(**_seat0.bundle["movement"])
     movement = detect_movement(df, seat_ch, bundle_mv)
 
-    def person_rows(p):
+    def person_rows(p, cols=None):
+        """cols = 넣는 순서 (판정기 직접: 모델 순서 seat_ch / 엔진: 서버와 같은 config 순서 cfg_names)"""
+        cols = cols or seat_ch
         g = df[df["person"] == p]
         b = g[(g["cls"] == BASELINE_CLS) & (g["depth"] == BASELINE_DEPTH) & ~movement.loc[g.index]]
         b = b[(b[seat_ch] >= BASELINE_MIN_FRAC * ADC_MAX).all(axis=1)].head(BASELINE_SAMPLES)
         dist = g["distance_cm"].to_numpy(dtype=float)
-        return g[seat_ch].to_numpy(dtype=float), dist, b[seat_ch].to_numpy(dtype=float)
+        return g[cols].to_numpy(dtype=float), dist, b[cols].to_numpy(dtype=float)
 
     @check("좌면: 엔진 결과 == 좌면 판정기 직접 결과 (수집 데이터 3명 × 앞 1500순간, 0.5초 간격)")
     def _():
         out = []
         for p in sorted(df["person"].unique()):
             X, dist, base = person_rows(p)
-            X, dist = X[:N_ROWS], dist[:N_ROWS]
-            seat = SeatClassifier(model_path, overrides={"dist_warn_cm": 40, "dist_caution_cm": 50})
+            Xc, _, base_c = person_rows(p, cfg_names)
+            X, Xc, dist = X[:N_ROWS], Xc[:N_ROWS], dist[:N_ROWS]
+            seat = load_seat_classifier(model_path, overrides={"dist_warn_cm": 40, "dist_caution_cm": 50})
             seat.calibrate(base)
             eng = SitSenseEngine(cfg, model_path, require_camera=False)
-            res = eng.calibrate([sample(T0, row) for row in base])
+            res = eng.calibrate([sample(T0, row) for row in base_c])
             assert res.ok, res.message
             diff = 0
-            for i, (row, d) in enumerate(zip(X, dist)):
+            for i, (row, rc, d) in enumerate(zip(X, Xc, dist)):
                 ts = T0 + 100 + i * 0.5
                 dcm = None if np.isnan(d) else float(int(d * 10)) / 10
                 a = seat.update(ts, row, dcm)
-                b = eng.update(sample(ts, row, None if dcm is None else dcm * 10))
+                b = eng.update(sample(ts, rc, None if dcm is None else dcm * 10))
                 diff += (a.state != b.seat_state) or (a.distance_state != b.distance_level)
             assert diff == 0, f"{p}: {diff}순간 다름"
             out.append(f"{p} {len(X)}순간")
@@ -114,7 +125,7 @@ def main() -> int:
     @check("좌면: 0.1초 간격(서버 mock 속도)으로 넣어도 0.5초 간격과 같은 결과")
     def _():
         p = sorted(df["person"].unique())[0]
-        X, dist, base = person_rows(p)
+        X, dist, base = person_rows(p, cfg_names)
         X, dist = X[:300], dist[:300]
         e2 = SitSenseEngine(cfg, model_path, require_camera=False)
         e10 = SitSenseEngine(cfg, model_path, require_camera=False)
@@ -211,7 +222,8 @@ def main() -> int:
         res, eng = run_scenario("normal", seconds=20)
         before = list(eng.pressure_base)
         last = res[-1][1]
-        weak = [sample(T0 + 50 + i * 0.5, [3500, 3500, 3500, 3500, 3500, 100], 600) for i in range(20)]
+        # 단계별 모델: 25% 이상 눌린 센서가 3개 미만이면 실패 (2개만 눌림)
+        weak = [sample(T0 + 50 + i * 0.5, [3500, 100, 100, 3500, 100, 100], 600) for i in range(20)]
         r1 = SitSenseEngine(cfg, model_path, require_camera=False).calibrate(weak)
         assert not r1.ok and r1.reason == "pressure_low", f"덜 눌린 센서: {r1}"
         r2 = eng.calibrate(weak)                              # 카메라 필요 → 사람 없음이 먼저
@@ -264,7 +276,96 @@ def main() -> int:
         assert fresh.seat_state == "unknown" and not fresh.baseline_ready, "기준 없이 판정함"
         return "직전 상태 유지, JSON OK, 기준 전에는 unknown"
 
+    # ------------------------------------------------------------------ 단계별 좌면 (2차 수집)
+    @check("단계별 좌면: 앉은 위치별 기준(앞·중·뒤) → depth 모델, 5개 자세 값 + 체중 쪽, 저장 기준 복원 (2차 데이터)")
+    def _():
+        from ai.analysis.dataset_v2 import load_dataset
+        from common.schema import SeatState
+        d2, _, _ = load_dataset(repo_path("data/dataset"))
+        p = "p11"                                             # 센서 상태가 좋은 사람
+        g = d2[(d2["person"] == p) & d2["last_attempt"] & ~d2["rest"]]
+        def seg(label, n=None):
+            x = g[g["label"] == label]
+            return x[cfg_names].to_numpy(dtype=float)[:n], x["dist_head"].to_numpy(dtype=float)[:n]
+        eng = SitSenseEngine(cfg, model_path, require_camera=False)
+        r0 = eng.calibrate_position("front", [sample(T0, [3500] * 6)])
+        assert not r0.ok and r0.reason == "no_baseline", r0
+        calib = {}
+        for pos, label in (("middle", "바른자세(중)"), ("front", "바른자세(앞)"), ("back", "바른자세(뒤)")):
+            X, D = seg(label)
+            calib[pos] = [sample(T0, row, None if np.isnan(dd) else dd * 10) for row, dd in zip(X[4:24], D[4:24])]
+        res = eng.calibrate(calib["middle"])
+        assert res.ok, res.message
+        for pos in ("front", "back"):
+            assert eng.calibrate_position(pos, calib[pos]).ok
+        X, D = seg("오른다리꼬기(앞)", 240)                        # 2분: 오른다리 꼼 → 체중 왼쪽
+        states, sides, modes = [], [], set()
+        for i, (row, dd) in enumerate(zip(X, D)):
+            r = eng.update(sample(T0 + 100 + i * 0.5, row, None if np.isnan(dd) else dd * 10))
+            assert r.seat_state in {s.value for s in SeatState}, r.seat_state
+            states.append(r.seat_state)
+            sides.append(r.seat_side)
+            modes.add(r.seat_baseline_mode)
+        assert modes == {"depth"}, f"위치별 기준인데 모드 {modes}"
+        decided = [s for s in sides if s is not None]
+        left = np.mean([s == "left" for s in decided]) if decided else 0.0
+        assert left >= 0.6, f"오른다리 꼬기 → 체중 왼쪽 비율 {left:.0%} ({states[-5:]})"
+        # 저장 기준으로 복원 → 같은 판정
+        e1 = SitSenseEngine(cfg, model_path, require_camera=False)
+        e1.calibrate(calib["middle"])
+        for pos in ("front", "back"):
+            e1.calibrate_position(pos, calib[pos])
+        e2 = SitSenseEngine(cfg, model_path, require_camera=False)
+        e2.restore(eng.pressure_base, eng.upper_base.distance_mm, None, positions=eng.position_base)
+        diff = 0
+        for i, (row, dd) in enumerate(zip(X, D)):
+            sm = sample(T0 + 500 + i * 0.5, row, None if np.isnan(dd) else dd * 10)
+            diff += e1.update(sm).seat_state != e2.update(sm).seat_state
+        assert diff <= 2, f"복원 후 {diff}순간 다름"
+        return f"{p} 오른다리꼬기(앞): 체중 왼쪽 {left:.0%}, 마지막 {states[-1]}, 복원 일치"
+
     # ------------------------------------------------------------------ 카메라 부품
+    @check("거북목: 카메라가 판정, 거리센서 2개는 확신도 보조 (A 머리만 · B 가슴만 뒤로), 숙임·가슴 막힘")
+    def _():
+        from ai.engine.upper_body import Baseline, UpperRules, judge
+        from ai.features.pose_features import UpperFeatures
+        rules = UpperRules.from_config(cfg)
+        b = Baseline()
+        b.value = UpperFeatures(neck_height=1.0, face_ratio=0.5, shoulder_angle=0.0, head_angle=0.0,
+                                head_offset=0.0, shoulder_width_px=300.0)
+        b.distance_mm, b.chest_mm = 650.0, 450.0                 # 바른자세: 머리 65cm, 가슴 45cm
+        def f(neck=1.0, face=0.5):
+            return UpperFeatures(neck_height=neck, face_ratio=face, shoulder_angle=0.0, head_angle=0.0,
+                                 head_offset=0.0, shoulder_width_px=300.0)
+        cam1 = f(face=0.56)                                       # 얼굴 12% 커짐 (카메라 단서 1개)
+        cam2 = f(neck=0.85, face=0.56)                            # + 목 15% 감소 (2개)
+        # (이름, 특징, 머리 mm, 가슴 mm, 기대 상태, 기대 확신도)
+        cases = [
+            ("바른자세", f(), 650, 450, "normal", 0.8),
+            ("카메라 1개, 거리 변화 없음", cam1, 650, 450, "forward", 0.6),
+            ("카메라 2개, 거리 변화 없음", cam2, 650, 450, "forward", 0.8),
+            ("A. 머리만 6cm 가까움 + 카메라 1개", cam1, 590, 445, "forward", 0.75),
+            ("B. 가슴만 4cm 뒤로 + 카메라 1개", cam1, 640, 490, "forward", 0.75),
+            ("B + 카메라 2개 (최대 0.95)", cam2, 640, 490, "forward", 0.95),
+            ("상체 숙임 (머리 14cm·가슴 5cm 가까움) + 카메라 1개 → 보조 없음", cam1, 510, 400, "forward", 0.6),
+            ("의자 당김 / 숙임, 카메라 단서 없음 → 거북목 아님", f(), 510, 400, "normal", 0.8),
+            ("머리만 가까움, 카메라 단서 없음 → 거북목 아님", f(), 560, 450, "normal", 0.8),
+            ("가슴 측정 실패(0), 머리 11cm 가까움 → 예전 방식 +0.15", cam1, 540, 0, "forward", 0.75),
+            ("가슴 측정 실패(0), 머리 변화 작음", cam1, 620, 0, "forward", 0.6),
+            ("가슴이 17cm로 가까워도 사용: B. 가슴 4cm 뒤로", cam1, 640, None, "forward", 0.75),
+        ]
+        out = []
+        import copy
+        b17 = copy.copy(b)
+        b17.chest_mm = 170.0                                      # 고정된 가슴 센서: 바른자세 17cm
+        for name, feat, head, chest, want, conf in cases:
+            base, chest = (b17, 210.0) if chest is None else (b, chest)
+            j = judge(feat, base, rules, distance_mm=head, chest_mm=chest)
+            assert j.head.value == want, f"{name}: {j.head.value} (기대 {want}), 단서 {j.cues}, 변화 {j.deltas}"
+            assert abs(j.head_confidence - conf) < 1e-6, f"{name}: 확신도 {j.head_confidence} (기대 {conf})"
+            out.append(f"{name.split(' ')[0]}→{j.head.value} {j.head_confidence:.2f}")
+        return f"{len(cases)}개 통과 · " + " / ".join(out[3:6])
+
     @check("카메라: 켜기(warming → on)·최근 결과·끄기·오류 (가짜 카메라)")
     def _():
         class FakeCam:

@@ -422,3 +422,35 @@ def deviation_features(med: pd.DataFrame, ref: pd.DataFrame, channels: list[str]
     if distance is not None:
         F["distance_cm"] = distance.to_numpy(dtype=float)
     return F
+
+
+# ---------------------------------------------------------------------------
+# 단계별 좌면 판정 특징 (2차 수집 11명, ai/analysis/story 12~17단계) — 학습과 실시간이 같은 함수
+# ---------------------------------------------------------------------------
+STAGED_FLOOR = 0.25                  # 기준이 최대치의 25%보다 작으면 25%로 나눔 (덜 눌린 센서에서 값이 폭발하지 않게)
+STAGED_LOW = -0.3                    # 기준보다 30% 넘게 빠진 센서 수 = n_low
+
+
+def staged_features(med, base, channels: list[str]) -> pd.DataFrame:
+    """2초 중앙값(줄 × 채널)과 그 줄의 기준(같은 모양 또는 채널 하나) → 기준 대비 변화 특징
+
+    n_<채널> = (지금 − 기준) / max(기준, 최대치의 25%), −1~1로 자름
+    LR_front·LR_mid·LR_back = 같은 줄 왼쪽 − 오른쪽, LR_all = 왼쪽 평균 − 오른쪽 평균,
+    diag = (왼앞 + 오른뒤) − (오른앞 + 왼뒤), n_low = 30% 넘게 빠진 센서 수
+    (분석 코드 ai/analysis/preprocess_report.features(kind='B')와 같은 값 — train_staged가 학습 때 확인)"""
+    X = np.atleast_2d(np.asarray(med, dtype=float))
+    B = np.broadcast_to(np.asarray(base, dtype=float), X.shape)
+    d = np.clip((X - B) / np.maximum(B, STAGED_FLOOR * ADC_MAX), -1, 1)
+    F = pd.DataFrame(d, columns=[f"n_{c}" for c in channels])
+    col = {c: d[:, i] for i, c in enumerate(channels)}
+    for row in ("front", "mid", "back"):
+        if f"L_{row}" in col and f"R_{row}" in col:
+            F[f"LR_{row}"] = col[f"L_{row}"] - col[f"R_{row}"]
+    left = [col[c] for c in channels if c.startswith("L_")]
+    right = [col[c] for c in channels if c.startswith("R_")]
+    if left and right:
+        F["LR_all"] = np.mean(left, axis=0) - np.mean(right, axis=0)
+    if {"L_front", "R_back", "R_front", "L_back"} <= set(channels):
+        F["diag"] = (col["L_front"] + col["R_back"]) - (col["R_front"] + col["L_back"])
+    F["n_low"] = (d < STAGED_LOW).sum(axis=1).astype(float)
+    return F
