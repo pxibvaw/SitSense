@@ -1,12 +1,14 @@
-"""거북목 데이터 수집 — 카메라(상체 점) + 거리센서 2개(머리·가슴)를 같이 기록 (Raspberry Pi에서 실행)
+"""거북목·좌우 기울기 데이터 수집 — 카메라(상체 점) + 거리센서 2개(머리·가슴)를 같이 기록 (Raspberry Pi에서 실행)
 
-한 번 실행 = 한 사람 = 자세 6개 (각 30초, 사이 5초 쉬기) ≈ 3분 30초
+한 번 실행 = 한 사람 = 자세 8개 (각 30초, 사이 5초 쉬기) ≈ 4분 40초
     1 바른자세        기준 (분석에서 처음 10초를 기준값으로 씀)
     2 머리내밀기      거북목 A: 몸통은 그대로, 머리만 화면 쪽으로
     3 어깨말림        거북목 B: 머리는 그대로, 어깨를 말고 등을 구부정하게 (가슴이 뒤로)
     4 상체숙임        거북목 아님: 허리부터 몸 전체를 앞으로
     5 등받이기댐      거북목 아님: 등받이에 기대기
-    6 바른자세2       마무리
+    6 왼쪽기울기      상체를 '내' 왼쪽으로 기울이기 (기울기 기준값 확인용)
+    7 오른쪽기울기    상체를 '내' 오른쪽으로 기울이기
+    8 바른자세2       마무리
 쉬는 5초 동안 다음 자세로 바꾼다 (phase=rest로 저장, 분석에서는 안 씀).
 
 옆모습 정답(CVA): 시작 전에 휴대폰으로 옆에서 영상 녹화를 켜 두고, 자세가 바뀔 때마다 화면 안내를 소리 내어 읽는다.
@@ -50,6 +52,8 @@ POSTURES = [
     ("어깨말림", "머리 위치는 그대로, 어깨를 앞으로 말고 등을 구부정하게"),
     ("상체숙임", "허리부터 몸 전체를 앞으로 숙이세요 (목은 곧게)"),
     ("등받이기댐", "등받이에 편하게 기대세요"),
+    ("왼쪽기울기", "상체를 '내' 왼쪽으로 기울이세요 (평소 삐딱하게 앉는 정도)"),
+    ("오른쪽기울기", "상체를 '내' 오른쪽으로 기울이세요 (평소 삐딱하게 앉는 정도)"),
     ("바른자세2", "다시 바르게 앉으세요 (마무리)"),
 ]
 LABELS = [p for p, _ in POSTURES]
@@ -143,6 +147,9 @@ def run_collect(stream, dist, args, cfg) -> None:
         w = csv.writer(fh)
         w.writerow(columns())
         for k, label, desc in plan:
+            if hasattr(stream, "src"):                  # mock: 가짜 사람도 자세를 바꿈 (코드 확인용)
+                stream.src.head = "forward" if label in ("머리내밀기", "어깨말림") else "normal"
+                stream.set_tilt({"왼쪽기울기": "left", "오른쪽기울기": "right"}.get(label, "none"))
             for phase, seconds in (("rest", args.rest), ("record", args.seconds)):
                 if phase == "rest":
                     say(f"\a\n[{k}/{len(POSTURES)}] 다음: {label} — {desc}  ({seconds:g}초 뒤 시작)")
@@ -174,7 +181,7 @@ def run_collect(stream, dist, args, cfg) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="거북목 수집: 카메라 + 머리·가슴 거리")
+    ap = argparse.ArgumentParser(description="거북목·기울기 수집: 카메라 + 머리·가슴 거리")
     ap.add_argument("--subject", help="사람 ID (n1, n2 …, 실명 금지)")
     ap.add_argument("--clothes", choices=["tight", "loose"], default="tight", help="옷: tight(붙는 옷, 기본) / loose")
     ap.add_argument("--seconds", type=float, default=30, help="자세당 기록 시간(초)")
