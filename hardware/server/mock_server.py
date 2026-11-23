@@ -94,7 +94,8 @@ class MockRuntime:
             if b:
                 self.current_baseline = BaselineValue(
                     created_at=b["measured_at"], seconds=b["seconds"] or 0.0, pressure=b["pressure"],
-                    distance_mm=b["distance_mm"], pose=b["pose"], kind=b["kind"])
+                    distance_mm=b["distance_mm"], pose=b["pose"], kind=b["kind"],
+                    chest_mm=b.get("chest_mm"))
         self.select(scenario, loop, seed)
 
     # --- 데이터 출처 (RealRuntime이 바꾼다) -------------------------------------

@@ -46,7 +46,7 @@ class AiEngine(MockEngine):
         self.filters = {k: PassThroughFilter() for k in ("seat", "head", "tilt")}
         self._r = None
         if baseline is not None:                    # 저장된 기준으로 시작 (서버 재시작 등)
-            self.ai.restore(baseline.pressure, baseline.distance_mm, baseline.pose)
+            self.ai.restore(baseline.pressure, baseline.distance_mm, baseline.pose, chest_mm=baseline.chest_mm)
 
     # --- 기준 자세 ----------------------------------------------------------
     def on_calibrate(self, samples):

@@ -17,16 +17,16 @@ from collections import deque
 from hardware.mock.generator import CAMERA_WARMUP_SEC
 from hardware.sensors.power import SimulatedSwitch, Switchable
 
-SENSORS = ("pressure", "camera", "distance")
+SENSORS = ("pressure", "camera", "distance", "chest")
 
 
 def decide(session_state: str, in_segment: bool) -> dict[str, bool]:
     """세션 상태(idle/running/paused, 세션 없이 측정 중이면 calibrating) + 착석 구간 안인지 → 센서별 켤지"""
     if session_state in ("running", "calibrating"):
-        return {"pressure": True, "camera": in_segment, "distance": in_segment}
+        return {"pressure": True, "camera": in_segment, "distance": in_segment, "chest": in_segment}
     if session_state == "paused":
-        return {"pressure": True, "camera": False, "distance": False}
-    return {"pressure": False, "camera": False, "distance": False}
+        return {"pressure": True, "camera": False, "distance": False, "chest": False}
+    return {"pressure": False, "camera": False, "distance": False, "chest": False}
 
 
 class PowerPolicy:
@@ -41,14 +41,17 @@ class PowerPolicy:
     def apply(self, ts: float, session_state: str, in_segment: bool) -> dict[str, bool]:
         want = decide(session_state, in_segment)
         for name, on in want.items():
-            sw = self.switches[name]
+            sw = self.switches.get(name)
+            if sw is None:
+                continue
             if on != sw.is_on:
                 (sw.power_on if on else sw.power_off)(ts)
                 self.events.append((ts, name, on))
         return want
 
     def is_on(self, name: str) -> bool:
-        return self.switches[name].is_on
+        sw = self.switches.get(name)
+        return sw.is_on if sw is not None else False
 
     def states(self, ts: float) -> dict[str, str]:
-        return {name: self.switches[name].state(ts) for name in SENSORS}
+        return {name: self.switches[name].state(ts) for name in self.switches}

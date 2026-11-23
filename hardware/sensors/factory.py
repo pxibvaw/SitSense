@@ -23,6 +23,7 @@ log = logging.getLogger("sitsense.sensors")
 # (모듈, 클래스, 설명) — 센서가 추가되면 여기만 고친다
 PRESSURE = ("hardware.sensors.pressure", "Mcp3208Pressure", "압력센서(MCP3208 + FSR)")
 DISTANCE = ("hardware.sensors.distance", "Hcsr04Distance", "거리센서(HC-SR04)")
+CHEST = ("hardware.sensors.distance", "Hcsr04Distance", "가슴 거리센서(HC-SR04)")
 
 
 def _load(spec: tuple[str, str, str], cfg: dict):
@@ -60,4 +61,13 @@ def build_hub(cfg: dict, *, camera: str = "none", rotate180: bool = False, pose=
     except Exception:
         pressure.close()                                  # 하나 열고 다른 게 실패하면 닫고 나간다
         raise
-    return SensorHub(pressure, distance, pose, n_channels=pr["n_channels"], adc_max=pr["adc_max"])
+    chest = None
+    if "chest" in cfg:
+        try:
+            chest = _load(CHEST, {"distance": cfg["chest"]})
+        except Exception:
+            pressure.close()
+            distance.close()
+            raise
+    return SensorHub(pressure, distance, pose, chest=chest,
+                     n_channels=pr["n_channels"], adc_max=pr["adc_max"])

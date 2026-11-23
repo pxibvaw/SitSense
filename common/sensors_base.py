@@ -119,6 +119,7 @@ class Sample:
     pressure: PressureReading
     distance: DistanceReading
     pose: PoseReading | None     # 카메라는 느려서(초당 ~5장) 가장 최근 값. 카메라 없으면 None
+    chest_mm: float | None = None  # 가슴 거리(mm, 거북목 보조용). 센서 없음·측정 실패면 None — AI 엔진이 getattr로 읽는 이름
 
 
 # ---------------------------------------------------------------------------
@@ -175,15 +176,16 @@ class SensorHub:
     """
 
     def __init__(self, pressure: PressureSensor, distance: DistanceSensor,
-                 pose: PoseSource | None = None, *, n_channels: int = 6,
-                 adc_max: int = 4095, max_consecutive_errors: int = 20):
+                 pose: PoseSource | None = None, *, chest: DistanceSensor | None = None,
+                 n_channels: int = 6, adc_max: int = 4095, max_consecutive_errors: int = 20):
         self.pressure = pressure
         self.distance = distance
         self.pose = pose
+        self.chest = chest
         self.n_channels = n_channels
         self.adc_max = adc_max
         self.max_errors = max_consecutive_errors
-        self.errors = {"pressure": 0, "distance": 0, "pose": 0}   # 연속 실패 횟수
+        self.errors = {"pressure": 0, "distance": 0, "pose": 0, "chest": 0}   # 연속 실패 횟수
 
     def _fail(self, name: str, err: Exception) -> None:
         self.errors[name] += 1
@@ -226,10 +228,19 @@ class SensorHub:
                 self._fail("pose", e)
                 pose = PoseReading.empty(ts)
 
-        return Sample(ts=ts, pressure=pressure, distance=distance, pose=pose)
+        chest_mm = None
+        if self.chest is not None:
+            try:
+                c = self.chest.read()
+                chest_mm = float(c.distance_mm) if c.valid else None
+                self._ok("chest")
+            except Exception as e:  # noqa: BLE001
+                self._fail("chest", e)
+
+        return Sample(ts=ts, pressure=pressure, distance=distance, pose=pose, chest_mm=chest_mm)
 
     def close(self) -> None:
-        for s in (self.pressure, self.distance, self.pose):
+        for s in (self.pressure, self.distance, self.pose, self.chest):
             if s is None:
                 continue
             try:

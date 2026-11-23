@@ -124,6 +124,7 @@ class RealSource:
             pressure=dataclasses.replace(s.pressure, ts=s.pressure.ts + d),
             distance=dataclasses.replace(s.distance, ts=s.distance.ts + d),
             pose=None if s.pose is None else dataclasses.replace(s.pose, ts=s.pose.ts + d),
+            chest_mm=s.chest_mm,
         )
 
     def close(self) -> None:
@@ -150,6 +151,10 @@ class RealRuntime(MockRuntime):
                                     off_value=lambda: DistanceReading.failed(now())),
             "camera": GatedSensor("camera", hub.pose, warmup_sec=CAMERA_WARMUP_SEC),
         }
+        if hub.chest is not None:
+            self.gates["chest"] = GatedSensor("chest", hub.chest,
+                                              off_value=lambda: DistanceReading.failed(now()))
+            hub.chest = self.gates["chest"]
         hub.pressure = self.gates["pressure"]
         hub.distance = self.gates["distance"]
         hub.pose = self.gates["camera"] if has_camera else None

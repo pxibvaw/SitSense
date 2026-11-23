@@ -167,7 +167,7 @@ class Recorder:
             return None
         return {"id": r["id"], "kind": r["kind"], "measured_at": r["measured_at"], "seconds": r["seconds"],
                 "pressure": pressure, "distance_mm": r["distance_mm"],
-                "pose": json.loads(r["pose"]) if r["pose"] else None}
+                "pose": json.loads(r["pose"]) if r["pose"] else None, "chest_mm": r["chest_mm"]}
 
     # --- 세션 · 기준 자세 (즉시) ------------------------------------------------
     def session_started(self, sid: str, ts: float, settings: dict) -> None:
@@ -221,11 +221,12 @@ class Recorder:
                 c.execute("UPDATE baselines SET is_current = 0 WHERE id = ?", (prev["id"],))
             out["id"] = c.execute(
                 "INSERT INTO baselines (kind, status, fail_reason, measured_at, session_id, seconds, layout_id, "
-                "pressure, distance_mm, pose, based_on_id, is_current) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "pressure, distance_mm, pose, based_on_id, is_current, chest_mm) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (result["kind"], result["status"], result.get("fail_reason"), result["measured_at"],
                  self.session_id, result.get("seconds"), self.layout_id,
                  _json(v.pressure) if v else None, v.distance_mm if v else None,
-                 _json(v.pose) if v and v.pose else None, prev["id"] if prev else None, int(ok))).lastrowid
+                 _json(v.pose) if v and v.pose else None, prev["id"] if prev else None, int(ok),
+                 v.chest_mm if v else None)).lastrowid
             self._set_last_seen(c, result["measured_at"])
         self._tx(w)
         return out["id"]

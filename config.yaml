@@ -34,6 +34,14 @@ distance:             # HC-SR04 (초음파, GPIO). Echo는 분압 회로로 3.3V
   max_mm: 2000        # 멀면 측정 안 된 것으로 보고 빈칸 (수집 스크립트 MAX_DIST_M = 2.0)
   median_window: 5    # 튀는 값 걸러내기용 중앙값 개수 (gpiozero queue_len)
 
+chest:                # HC-SR04 가슴 거리센서 (거북목 보조용). 없으면 이 섹션 전체를 주석 처리
+  sensor: hc-sr04
+  trigger_pin: 5      # BCM 번호 (물리 핀 29) — collect_all1117.py와 같은 핀
+  echo_pin: 6         # BCM 번호 (물리 핀 31)
+  min_mm: 20
+  max_mm: 2000
+  median_window: 5
+
 camera:               # 정면, 모니터 위 (HC-SR04와 함께 설치)
   index: 1            # 맥 웹캠 번호 (아이폰 연속성 카메라가 0번을 잡으면 1번. 확인: python -m ai.camera.demo --list-cameras)
   width: 1280         # 좌표를 픽셀로 바꿀 때도 사용

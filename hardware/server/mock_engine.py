@@ -72,6 +72,7 @@ class BaselineValue:
     distance_mm: float | None
     pose: dict[str, list[float]] | None
     kind: str = "initial"           # initial / session / recalibration / adjusted
+    chest_mm: float | None = None   # 기준 가슴 거리 중앙값 (가슴 센서 없음·측정 부족이면 None)
 
 
 # 기준 자세 측정 품질 (⚠️ 임시값 — 실물로 조정)
@@ -167,6 +168,8 @@ class MockEngine:
         totals = np.array([sum(s.pressure.values) for s in buf], dtype=float)
         dists = [s.distance.distance_mm for s in buf if s.distance.valid]
         poses = [s.pose for s in buf if s.pose is not None and s.pose.detected]
+        chest_min = float(self.rules.get("chest_min_mm", 50))   # 이보다 가까운 값(0 포함)은 막힘·실패
+        chests = [c for c in (getattr(s, "chest_mm", None) for s in buf) if c is not None and c >= chest_min]
         reason = None
         if self.require_pose and len(poses) < BASELINE_MIN_POSE_RATIO * n:
             reason = "no_person"
@@ -185,7 +188,8 @@ class MockEngine:
                      for nm in LANDMARK_NAMES} if poses else None)       # 카메라 없이 잰 기준은 pose 없음
             self.baseline = result["value"] = BaselineValue(
                 created_at=ts, seconds=result["seconds"], pressure=[round(float(v), 1) for v in p],
-                distance_mm=float(np.median(dists)), pose=pose, kind=m["kind"])
+                distance_mm=float(np.median(dists)), pose=pose, kind=m["kind"],
+                chest_mm=float(np.median(chests)) if len(chests) >= BASELINE_MIN_DISTANCE_RATIO * n else None)
         self.measure, self._buf, self.last_result = None, [], result     # 실패면 이전 기준(self.baseline) 유지
         if self.on_baseline:
             self.on_baseline(result)

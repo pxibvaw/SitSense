@@ -179,6 +179,7 @@
 | `layout_id` FK | |
 | `pressure` | JSON 채널별 평균 |
 | `distance_mm` | |
+| `chest_mm` | 기준 가슴 거리 (003 마이그레이션). 가슴 센서 없음·측정 부족이면 NULL |
 | `pose` | JSON 부위 7개 × [x, y, z, vis] (기준값이라 좌표 저장) |
 | `based_on_id` | 보정 결과면 원래 기준 id |
 | `is_current` | 현재 값 (부분 unique 인덱스로 하나만) |
