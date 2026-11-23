@@ -22,7 +22,7 @@ from hardware.server.check_session import KST, Checker, FakeTime
 from hardware.server.db import jobs as jobs_module
 from hardware.server.db.connection import connect
 from hardware.server.db.migrate import MIGRATIONS_DIR, latest_version, migrate
-from hardware.server.db.summary import NUMERIC, check_values, compute_day, summarize, write_summary
+from hardware.server.db.summary import NUMERIC, check_values, compute_day, day_bounds, summarize, write_summary
 
 D, D1 = "2026-10-15", "2026-10-16"
 
@@ -124,6 +124,20 @@ def main() -> int:
         check("00:31: 10-15 원본 삭제 + 삭제 시각 기록", raw_count(env, D) == 0 and j["raw_deleted_at"] is not None,
               clock_str(j["raw_deleted_at"]))
         check("오늘(10-16) 원본은 남음", raw_count(env, D1) > 0, f"{raw_count(env, D1)}덩어리")
+        # 하루가 지난 날은 일·주간 리포트에 쓰는 표만 남기고 상세(착석 구간·세션 이벤트)를 지운다
+        j = job(env, D)
+        day_end = day_bounds(D)[1]
+        check("10-15 상세 삭제 시각 기록 (원본과 같은 때)", j["details_deleted_at"] is not None,
+              clock_str(j["details_deleted_at"]) if j["details_deleted_at"] else None)
+        check("10-15 착석 구간·세션 이벤트 삭제", env.one("SELECT COUNT(*) FROM seating_segments WHERE day = ?", D) == 0
+              and env.one("SELECT COUNT(*) FROM session_events WHERE ts < ?", day_end) == 0, "0건")
+        check("오늘(10-16) 착석 구간은 남음", env.one("SELECT COUNT(*) FROM seating_segments WHERE day = ?", D1) > 0,
+              env.one("SELECT COUNT(*) FROM seating_segments WHERE day = ?", D1))
+        check("리포트용 표는 그대로 (시간대별·하루 요약·세션 줄·현재 기준)",
+              env.one("SELECT COUNT(*) FROM posture_hour WHERE day = ?", D) > 0
+              and env.one("SELECT COUNT(*) FROM daily_summary WHERE day = ?", D) == 1
+              and env.one("SELECT COUNT(*) FROM sessions") >= 1
+              and env.one("SELECT COUNT(*) FROM baselines WHERE is_current = 1") == 1, "남음")
         bad = summarize(env.db, D, "recompute", env.rt.clock.now())
         check("원본 삭제 뒤 다시 계산해도 값이 같음 (원본에 의존 안 함)", not bad and numbers(summary(env, D)) == before,
               "같음" if numbers(summary(env, D)) == before else "다름")
@@ -136,8 +150,8 @@ def main() -> int:
         check("같은 날 요약 2번 → 값 같음", numbers(summary(env, D)) == a1, "같음")
         r = env.rt.jobs.run(env.rt.clock.now())
         r2 = env.rt.jobs.run(env.rt.clock.now())
-        check("자정 작업 2번 더 → 할 일 없음, 오류 없음", r == r2 == {"summarized": [], "failed": [], "raw_deleted": []},
-              r2)
+        check("자정 작업 2번 더 → 할 일 없음, 오류 없음",
+              r == r2 == {"summarized": [], "failed": [], "raw_deleted": [], "details_deleted": []}, r2)
 
         # ------------------------------------------------------------------
         print("\n6) 계산 버전이 바뀜 → 서버를 켤 때 다시 계산")
@@ -145,8 +159,8 @@ def main() -> int:
         env6 = new_env(cfg, db, env.rt.clock.now() + 1, "demo",
                        ft=FakeTime())
         s6 = summary(env6, D)
-        check("calc_version 1, source recompute, 값 같음",
-              s6["calc_version"] == 1 and s6["source"] == "recompute" and numbers(s6) == a1,
+        check("상세를 지운 날은 다시 계산하지 않음: 저장된 요약 값 그대로 (착석 구간이 없어 계산 불가)",
+              s6["calc_version"] == 0 and numbers(s6) == a1,
               f"calc_version {s6['calc_version']}, {s6['source']}")
 
         # ------------------------------------------------------------------

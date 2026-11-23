@@ -140,6 +140,9 @@ def mark_checked(conn: sqlite3.Connection, day: str) -> None:
 
 def summarize(conn: sqlite3.Connection, day: str, source: str, now_ts: float) -> list[str]:
     """계산 → 저장 → 확인. 확인되면 summary_checked=1. 틀린 이유 목록을 돌려준다 ([]면 성공)"""
+    if conn.execute("SELECT 1 FROM day_jobs WHERE day = ? AND details_deleted_at IS NOT NULL", (day,)).fetchone():
+        log.warning("%s: 착석 구간을 이미 지운 날이라 다시 계산하지 않음 (저장된 요약 유지)", day)
+        return []
     values = compute_day(conn, day, now_ts)
     write_summary(conn, day, values, source, now_ts)
     bad = verify_summary(conn, day, values)

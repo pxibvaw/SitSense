@@ -49,6 +49,8 @@ def main() -> int:
         db = tmp / "history.db"
         out = build(db, cfg, END, 14, seed=1)
         print(f"가짜 기록: {out['start']} ~ {out['end']}, 요약 {len(out['summarized'])}일")
+        before = tmp / "history_before_jobs.db"          # 서버가 켜지고 자정 작업이 상세를 지우기 전 (실시간 계산 비교용)
+        shutil.copy(db, before)
         ft = FakeTime()
         clock = AppClock(monotonic=ft.mono, wall=ft.wall)
         app = create_app(cfg, "normal", loop=True, seed=1, db_path=db, clock=clock)
@@ -76,11 +78,12 @@ def main() -> int:
 
         print("\n2) 요약 경로 = 실시간 경로 (같은 계산 함수)")
         rep = Reports(db, clock)
+        rep_live = Reports(before, clock)                # 착석 구간이 남아 있는 복사본
         today = date(2026, 10, 6)
         worst = 0.0
         for day in sorted(summ):
             v = rep.day_values(date.fromisoformat(day), today, NOW)
-            live = compute_day(rep.conn, day, NOW)
+            live = compute_day(rep_live.conn, day, NOW)
             worst = max(worst, max(abs((v[k] or 0) - (live[k] or 0)) for k in NUMERIC))
             assert v["source"] == "summary"
         check(f"요약 {len(summ)}일 모두 실시간 계산과 같음", worst < 1e-6, f"최대 차이 {worst:.2e}")
@@ -106,7 +109,7 @@ def main() -> int:
             j = c.get("/reports/daily", params={"date": day}).json()
             check(f"{day} {label}: has_data={has}, 세션 {sessions}개", j["has_data"] == has and j["sessions"] == sessions
                   and j["normal_ratio"] is None, f"has_data={j['has_data']}, sessions={j['sessions']}")
-        mid_start = raw.execute("SELECT MAX(start_ts) FROM seating_segments WHERE day = '2026-09-26'").fetchone()[0]
+        mid_start = sqlite3.connect(before).execute("SELECT MAX(start_ts) FROM seating_segments WHERE day = '2026-09-26'").fetchone()[0]
         h0 = raw.execute("SELECT SUM(seconds) FROM posture_hour WHERE day = '2026-09-27' AND hour = 0").fetchone()[0]
         check("자정 걸침: 09-26 23:30 시작 구간은 09-26 소속, 00시 40분은 09-27 0시로",
               datetime.fromtimestamp(mid_start, KST).strftime("%H:%M") == "23:30" and close(h0, 2400, 1),

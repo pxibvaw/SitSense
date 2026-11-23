@@ -175,9 +175,23 @@ def main() -> int:
         s = c.get("/session").json()
         ok("구간 밖: 거리·카메라 꺼짐", s["sensors"]["distance"] == "off" and s["sensors"]["camera"] == "off", s["sensors"])
         inner_p.label, inner_p.noise = "normal", 20.0
+        run(rt, ft, 3)                          # 다시 앉음 → 새 착석 구간 → 기준 자세 다시 측정
+        sb = c.get("/session").json()["baseline"]
+        ok("자리를 비웠다 다시 앉으면 기준 자세를 다시 잼", sb["state"] in ("waiting_seat", "measuring")
+           and sb["kind"] == "session", (sb["state"], sb["kind"]))
+        run(rt, ft, 13)
+        s2 = c.get("/session").json()
+        ok("다시 측정 완료, 세션은 계속 (앞·뒤 기준은 새로 재야 함)",
+           s2["baseline"]["state"] == "ready" and s2["state"] == "running" and s2["baseline"]["positions_done"] == [],
+           (s2["baseline"]["state"], s2["state"], s2["baseline"]["positions_done"]))
 
         # 일시정지 → 거리 꺼짐, 정지 → 모두 꺼짐
         run(rt, ft, 3)
+        s = c.post("/session/pause").json()
+        c.post("/session/resume")
+        run(rt, ft, 3)
+        ok("일시정지 뒤 재개는 기준 자세를 다시 재지 않음",
+           c.get("/session").json()["baseline"]["state"] == "ready", c.get("/session").json()["baseline"]["state"])
         s = c.post("/session/pause").json()
         ok("일시정지: 압력만", s["sensors"]["pressure"] == "on" and s["sensors"]["distance"] == "off", s["sensors"])
         c.post("/session/resume")

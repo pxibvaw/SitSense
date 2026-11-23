@@ -137,6 +137,7 @@ class RealSource:
 # ---------------------------------------------------------------------------
 class RealRuntime(MockRuntime):
     mode = "real"
+    remeasure_after_away = True
     engine_cls = AiEngine
 
     def __init__(self, cfg: dict, hub: SensorHub, *, clock: AppClock | None = None,

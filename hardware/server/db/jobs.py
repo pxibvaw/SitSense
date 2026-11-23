@@ -1,4 +1,4 @@
-"""자정 작업 — 지난 날 요약 → 다시 읽어 확인 → 30분 뒤 그날 원본 삭제 (밀린 날짜 포함)
+"""자정 작업 — 지난 날 요약 → 다시 읽어 확인 → 30분 뒤 그날 원본·상세 삭제 (밀린 날짜 포함)
 
 서버 실행 루프가 1분마다, 그리고 서버가 켜진 뒤 첫 시각 동기화 직후 run()을 부른다.
 (동기화 전에는 오늘 날짜를 모르므로 돌리지 않는다.)
@@ -8,6 +8,9 @@
        요약(덮어쓰기) → 다시 읽어 확인 → summary_checked = 1
        확인이 안 되면 다음 실행 때 다시, 원본은 지우지 않음
     3. 확인 완료 + 첫 요약 후 30분이 지난 날의 raw_chunks 삭제 → raw_deleted_at
+    4. 원본을 지운 날의 상세도 삭제: 그날의 착석 구간, 세션 이벤트, 그날까지의 지난 기준 이력 → details_deleted_at
+       남는 것: 시간대별(posture_hour, hour_metrics)·하루 요약(daily_summary) = 일·주간 리포트, 세션 줄(리포트의 세션 수),
+       설정, 지금 쓰는 기준 1개. 상세를 지운 날은 요약을 다시 계산할 수 없어서 다시 계산 대상에서 뺀다 (값 보존)
 
 같은 날을 다시 돌려도 결과가 같다 (요약은 시간대별 표·구간에서만 계산해 덮어쓰고, 삭제는 한 번만 일어남).
 """
@@ -18,7 +21,7 @@ import sqlite3
 from datetime import timedelta
 
 from hardware.server.clock import AppClock
-from hardware.server.db.summary import CALC_VERSION, summarize
+from hardware.server.db.summary import CALC_VERSION, day_bounds, summarize
 
 log = logging.getLogger("sitsense.jobs")
 
@@ -44,7 +47,8 @@ class DayJobs:
         """계산 방식(CALC_VERSION)이 바뀐 요약을 다시 계산할 날로 표시"""
         n = self.conn.execute(
             "UPDATE day_jobs SET needs_recompute = 1 WHERE day IN "
-            "(SELECT day FROM daily_summary WHERE calc_version < ?)", (CALC_VERSION,)).rowcount
+            "(SELECT day FROM daily_summary WHERE calc_version < ?) AND details_deleted_at IS NULL",
+            (CALC_VERSION,)).rowcount
         if n:
             log.info("계산 방식이 바뀌어 %d일을 다시 계산할 예정", n)
         return n
@@ -60,13 +64,14 @@ class DayJobs:
     def pending_days(self, today: str) -> list[str]:
         rows = self.conn.execute(
             f"SELECT d.day FROM ({DATA_DAYS_SQL}) d LEFT JOIN day_jobs j ON j.day = d.day "
-            "WHERE d.day < ? AND (j.day IS NULL OR j.summary_checked = 0 OR j.needs_recompute = 1) "
+            "WHERE d.day < ? AND (j.day IS NULL OR (j.details_deleted_at IS NULL "
+            "AND (j.summary_checked = 0 OR j.needs_recompute = 1))) "
             "ORDER BY d.day", (today,)).fetchall()
         return [r[0] for r in rows]
 
     def run(self, now: float) -> dict:
         self._last_run = now
-        report = {"summarized": [], "failed": [], "raw_deleted": []}
+        report = {"summarized": [], "failed": [], "raw_deleted": [], "details_deleted": []}
         today = self._day(now)
         yesterday = self._day(now - 86400)
         days = self.pending_days(today)
@@ -86,6 +91,12 @@ class DayJobs:
         for (day,) in due:
             self._delete_raw(day, now)
             report["raw_deleted"].append(day)
+        todo = self.conn.execute(
+            "SELECT day FROM day_jobs WHERE raw_deleted_at IS NOT NULL AND details_deleted_at IS NULL "
+            "AND day < ? ORDER BY day", (today,)).fetchall()
+        for (day,) in todo:
+            self._delete_details(day, now)
+            report["details_deleted"].append(day)
         return report
 
     def _delete_raw(self, day: str, now: float) -> None:
@@ -102,6 +113,23 @@ class DayJobs:
         except sqlite3.Error:
             pass
         log.info("%s 원본 %d덩어리 삭제", day, n)
+
+    def _delete_details(self, day: str, now: float) -> None:
+        """요약·원본 삭제가 끝난 날의 착석 구간·세션 이벤트·지난 기준 이력 삭제 (리포트에 쓰는 표는 그대로)"""
+        end = day_bounds(day)[1]
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            seg = self.conn.execute("DELETE FROM seating_segments WHERE day = ?", (day,)).rowcount
+            ev = self.conn.execute("DELETE FROM session_events WHERE ts < ?", (end,)).rowcount
+            old = "SELECT id FROM baselines WHERE is_current = 0 AND measured_at < ?"
+            self.conn.execute(f"UPDATE baselines SET based_on_id = NULL WHERE based_on_id IN ({old})", (end,))
+            bl = self.conn.execute("DELETE FROM baselines WHERE is_current = 0 AND measured_at < ?", (end,)).rowcount
+            self.conn.execute("UPDATE day_jobs SET details_deleted_at = ? WHERE day = ?", (now, day))
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+        log.info("%s 상세 삭제: 착석 구간 %d, 세션 이벤트 %d, 지난 기준 %d", day, seg, ev, bl)
 
 
 def days_between(clock: AppClock, t0: float, t1: float) -> list[str]:

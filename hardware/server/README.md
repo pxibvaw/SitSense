@@ -127,6 +127,7 @@ python -m hardware.server.mock_server --export-openapi   # schemas.py를 고친 
 - **기준 자세:** 시작 버튼(`POST /session/start`)에 10초 측정이 들어 있다. 압력으로 앉은 게 확인되면 측정을 시작하고
   (서 있으면 대기, 측정 중 일어나면 다시 대기), 진행은 `GET /session`의 `baseline`으로 본다.
   처음이면 `initial`, 이후 세션은 `session`, `/calibrate`로 다시 재면 `recalibration`.
+  **real 모드는 자리를 비웠다(5초 이상) 다시 앉으면 기준 자세(중)를 다시 잰다** (일시정지 뒤 재개·세션 첫 구간은 제외). 이때 `/session`의 `baseline.state`가 `waiting_seat`/`measuring`을 거쳐 `ready`로 돌아오고, 실패하면 직전 기준으로 계속한다. 다시 재면 앞·뒤 기준은 비워진다.
   앉은 위치별 기준(선택, 좌면 ① 73→86%): 중 기준을 잰 뒤 `/calibrate?position=front` → `?position=back`을 각각 10초 (온보딩 +20초). 새 기준 행을 만들지 않고 현재 기준에 덧붙이며(`baselines.positions`), 진행·실패는 `/session`의 `baseline`(`kind`가 `position_front`/`position_back`, `positions_done`)으로 본다. 실패해도 기존 기준은 그대로이고 세션은 멈추지 않는다. 중 기준을 다시 재면 앞·뒤는 비워진다.
   `/calibrate`는 **세션 없이도** 받는다 (온보딩). 이때는 기준 자세만 재고 구간·원본 기록은 남기지 않는다
   (`baselines`에만 저장, 기준이 없으면 `initial`). 앉기를 기다리는 동안 `/baseline`의 `waiting_seat`가 true

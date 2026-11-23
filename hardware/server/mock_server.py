@@ -88,6 +88,7 @@ class MockRuntime:
         self.session_settings: dict = {}
         self.current_baseline: BaselineValue | None = None
         self.cal_engine: MockEngine | None = None       # 세션 없이 기준 자세만 잴 때 (온보딩)
+        self._last_seg = None                           # 마지막으로 본 착석 구간 (새로 시작했는지 알아내기)
         self.last_baseline_result: dict | None = None
         if self.recorder:
             self.clock.min_time = self.recorder.last_seen()     # 첫 동기화가 이보다 이전이면 거절
@@ -101,6 +102,7 @@ class MockRuntime:
 
     # --- 데이터 출처 (RealRuntime이 바꾼다) -------------------------------------
     mode = "mock"
+    remeasure_after_away = False    # 자리를 비웠다(5초↑) 다시 앉으면 기준 자세를 다시 잰다 (real 모드만 켬)
     camera_detail = "Pi Camera V2"
     engine_cls = MockEngine
 
@@ -374,11 +376,25 @@ class MockRuntime:
             if state != SessionState.RUNNING.value:     # 일시정지: 압력만 보고 기록·판단 안 함
                 return
             self.engine.update(sample, step)
+            self._maybe_remeasure()
             if self.recorder:
                 self.recorder.on_tick(ts, sample, self.engine.latest, self.engine.seating, empty)
             if self._pending_stop:
                 reason, self._pending_stop = self._pending_stop, None
                 self.stop_session(reason)
+
+    def _maybe_remeasure(self) -> None:
+        """자리 비움(5초 이상)으로 끝난 뒤 새 착석 구간이 시작되면 기준 자세를 다시 잰다.
+        일시정지 뒤 재개, 세션 첫 구간(시작 때 이미 잼)은 제외. 측정이 실패하면 직전 기준으로 계속"""
+        tr = self.engine.seating
+        seg = tr.current
+        if seg is None or seg is self._last_seg:
+            return
+        self._last_seg = seg
+        if (self.remeasure_after_away and self.engine.measure is None
+                and tr.segments and tr.segments[-1].end_reason == "away"):
+            self.engine.request_baseline("session")
+            log.info("자리를 비웠다 다시 앉음 → 기준 자세 다시 측정")
 
     def _run(self) -> None:
         while not self._stop.is_set():
