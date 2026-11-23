@@ -8,6 +8,36 @@ import java.util.TimeZone
 
 internal enum class MeasurementStatus { IDLE, RUNNING, PAUSED }
 
+internal enum class CalibrationStep(val position: SeatCalibrationPosition?) {
+    MIDDLE(null), FRONT(SeatCalibrationPosition.FRONT), BACK(SeatCalibrationPosition.BACK);
+
+    fun matches(kind: String): Boolean = position?.let { it.kind == kind }
+        ?: (kind in setOf("initial", "session", "recalibration"))
+}
+
+internal data class CalibrationSnapshot(
+    val state: String,
+    val kind: String,
+    val hasMiddle: Boolean,
+    val supportsPositions: Boolean,
+    val positionsDone: Set<SeatCalibrationPosition>
+) {
+    val inProgress: Boolean get() = state == "waiting_seat" || state == "measuring"
+
+    fun hasReusableBaseline(onboardingComplete: Boolean, sameDevice: Boolean): Boolean =
+        onboardingComplete && sameDevice && hasMiddle
+
+    fun completed(step: CalibrationStep): Boolean = state == "ready" &&
+        (step.position?.let { it in positionsDone } ?: hasMiddle)
+
+    fun nextPosition(): CalibrationStep? = when {
+        !supportsPositions -> null
+        SeatCalibrationPosition.FRONT !in positionsDone -> CalibrationStep.FRONT
+        SeatCalibrationPosition.BACK !in positionsDone -> CalibrationStep.BACK
+        else -> null
+    }
+}
+
 internal fun measurementElapsed(baseMillis: Long, startedAt: Long, now: Long): Long =
     baseMillis + (now - startedAt).coerceAtLeast(0L)
 

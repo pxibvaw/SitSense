@@ -1,6 +1,8 @@
 package com.example.barunjari
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.text.SimpleDateFormat
@@ -73,5 +75,43 @@ class AppSessionTest {
         assertEquals(date("2026-10-11"), days.last())
         assertEquals(7, days.size)
         assertEquals("2026.10.5 – 2026.10.11", ReportDates.label(date("2026-10-06"), true))
+    }
+
+    @Test
+    fun calibrationAdvancesFromMiddleToFrontToBack() {
+        val middle = CalibrationSnapshot("ready", "initial", true, true, emptySet())
+        val front = middle.copy(positionsDone = setOf(SeatCalibrationPosition.FRONT))
+        val back = middle.copy(positionsDone = setOf(SeatCalibrationPosition.BACK, SeatCalibrationPosition.FRONT))
+
+        assertTrue(middle.completed(CalibrationStep.MIDDLE))
+        assertEquals(CalibrationStep.FRONT, middle.nextPosition())
+        assertTrue(front.completed(CalibrationStep.FRONT))
+        assertEquals(CalibrationStep.BACK, front.nextPosition())
+        assertTrue(back.completed(CalibrationStep.BACK))
+        assertNull(back.nextPosition())
+    }
+
+    @Test
+    fun calibrationChecksServerPhaseAndSupportsSinglePositionServers() {
+        val pending = CalibrationSnapshot("measuring", "position_back", true, true,
+            setOf(SeatCalibrationPosition.FRONT))
+
+        assertTrue(pending.inProgress)
+        assertTrue(CalibrationStep.BACK.matches(pending.kind))
+        assertFalse(CalibrationStep.FRONT.matches(pending.kind))
+        assertFalse(pending.copy(state = "ready").completed(CalibrationStep.BACK))
+        assertFalse(pending.copy(state = "failed").completed(CalibrationStep.BACK))
+        assertNull(pending.copy(supportsPositions = false).nextPosition())
+    }
+
+    @Test
+    fun savedServerBaselineDoesNotSkipFreshOnboarding() {
+        val saved = CalibrationSnapshot("ready", "initial", true, true,
+            setOf(SeatCalibrationPosition.FRONT, SeatCalibrationPosition.BACK))
+
+        assertFalse(saved.hasReusableBaseline(onboardingComplete = false, sameDevice = true))
+        assertFalse(saved.hasReusableBaseline(onboardingComplete = true, sameDevice = false))
+        assertTrue(saved.hasReusableBaseline(onboardingComplete = true, sameDevice = true))
+        assertFalse(saved.copy(hasMiddle = false).hasReusableBaseline(onboardingComplete = true, sameDevice = true))
     }
 }
