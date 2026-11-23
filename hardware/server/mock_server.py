@@ -673,8 +673,11 @@ def main() -> int:
     ap.add_argument("--no-db", action="store_true", help="저장하지 않음")
     ap.add_argument("--engine", choices=["ai", "fake"], default="ai",
                     help="mock 모드의 판정: ai = AI 엔진(실제와 같은 경로, 기본), fake = 시나리오 정답을 그대로 (앱 화면 데모용)")
-    ap.add_argument("--camera", choices=["none", "picam", "webcam"], default="none",
-                    help="real 모드의 카메라: none(없이) / picam(Pi 카메라) / webcam(시험용)")
+    ap.add_argument("--camera", choices=["none", "picam", "webcam", "network"], default="none",
+                    help="real 모드의 카메라: none(없이) / picam(Pi 카메라) / webcam(시험용) / "
+                         "network(Pi에 카메라 없이, 노트북이 ai/camera/pose_sender.py로 보내는 좌표를 받음)")
+    ap.add_argument("--pose-port", type=int, default=8765,
+                    help="--camera network일 때 좌표를 받을 포트 (기본 8765)")
     ap.add_argument("--rotate180", action="store_true", help="카메라를 거꾸로 달았을 때")
     ap.add_argument("--autostart", action="store_true",
                     help="켜자마자 PC 시계로 시각 동기화 + 세션 시작 (앱 없이 바로 데이터 보기)")
@@ -697,8 +700,13 @@ def main() -> int:
         from common.sensors_base import SensorError
         from hardware.sensors.factory import build_hub
         from hardware.server.real_runtime import RealRuntime
+        pose, camera = None, args.camera
+        if camera == "network":                            # Pi에 카메라가 없을 때: 노트북 좌표를 네트워크로 받음
+            from hardware.sensors.network_pose import NetworkPoseSource
+            pose, camera = NetworkPoseSource(port=args.pose_port), "none"
         try:
-            runtime = RealRuntime(cfg, build_hub(cfg, camera=args.camera, rotate180=args.rotate180), db_path=db_path)
+            runtime = RealRuntime(cfg, build_hub(cfg, camera=camera, rotate180=args.rotate180, pose=pose),
+                                  db_path=db_path)
         except SensorError as e:
             log.error("%s", e)
             return 2
