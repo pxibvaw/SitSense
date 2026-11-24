@@ -53,8 +53,11 @@ ROW_Y = {"front": 1.0, "mid": 0.0, "back": -1.0}
 def find_sessions(folder: str | Path) -> list[tuple[str, Path, Path | None]]:
     """(세션 시각, posture 파일, distance 파일) — 2차 수집 형식만, 짧은 테스트 파일 제외"""
     folder = Path(folder)
+    # 파일이 한 폴더에 섞여 있어도, posture/ · distance/ 하위 폴더로 나뉘어 있어도 읽는다
+    pfold = folder / "posture" if (folder / "posture").is_dir() else folder
+    dfold = folder / "distance" if (folder / "distance").is_dir() else folder
     out = []
-    for f in sorted(folder.glob("posture_data_*.csv")):
+    for f in sorted(pfold.glob("posture_data_*.csv")):
         m = SESSION_RE.search(f.name)
         if not m:
             continue                                    # 이름 들어간 1차 파일, 형식 다른 파일
@@ -65,7 +68,7 @@ def find_sessions(folder: str | Path) -> list[tuple[str, Path, Path | None]]:
             if sum(1 for _ in fh) - 1 < MIN_ROWS:
                 continue
         sid = m.group(1)
-        dist = folder / f"distance_data_{sid}.csv"
+        dist = dfold / f"distance_data_{sid}.csv"
         out.append((sid, f, dist if dist.exists() else None))
     if not out:
         raise FileNotFoundError(f"{folder}에 2차 수집 형식(posture_data_YYYYMMDD_HHMMSS.csv) 파일이 없음")

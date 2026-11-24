@@ -31,6 +31,7 @@
     04_거리보조.png/.csv    거북목 확신도: 카메라만 vs 거리 보조 포함, 보조 A/B가 켜진 비율
     05_기울기단서.png       자세별 어깨선·눈선 각도, 코 옆이동 변화 (+ = 사람 왼쪽)
     06_기울기판정.png/.csv  지금 기준 / 데이터 기준으로 자세마다 left·right로 판정한 비율
+    07_규칙비교.png/.csv    예전 규칙 → 목만 → + 기울기 거르기 → + 숙임 거르기(지금 엔진)
     loso.csv, loso_tilt.csv 한 사람씩 빼고 시험한 결과 (사람별)
     summary.md             숫자 정리 + config에 넣을 값
 """
@@ -94,6 +95,10 @@ def prepare(df: pd.DataFrame, rules) -> tuple[pd.DataFrame, dict]:
     out, bases = [], {}
     for file, g in df.groupby("file", sort=False):
         g = g[g["phase"] == "record"].copy()
+        miss = [l for l in ORDER if g.loc[g["label"] == l, "neck_height"].notna().sum() < 10]
+        if miss:
+            log.warning("  %s: 카메라로 판단한 프레임이 없는 자세 %s → 불완전한 세션이라 뺌", file, miss)
+            continue
         b = g[(g["label"] == "바른자세") & g["t_seg"].between(BASE_FROM, BASE_TO)]
         if b["neck_height"].notna().sum() < 5:
             log.warning("  %s: 기준(첫 바른자세)에 카메라 판단 가능 프레임이 부족 → 건너뜀", file)
@@ -272,61 +277,105 @@ def main() -> int:
     fig.savefig(out / "01_단서분포.png", dpi=130)
     plt.close(fig)
 
-    # 2) ROC (전체 데이터) + 데이터로 고른 기준
+    # 2) ROC (단서 하나씩) — 얼굴 커짐 단서가 쓸모 있는지
     yy = d["y"].to_numpy()
-    t1, t2, ba_all = best_pair(d, d["y"], t_now)
-    combo = np.maximum(d["neck_drop"] / t1, d["face_grow"] / t2).to_numpy()
     fig, ax = plt.subplots(figsize=(6.5, 6))
     roc_rows = []
     for name, score, col in (("① 목 높이 감소", d["neck_drop"].to_numpy(), "#4c78a8"),
-                             ("② 얼굴 커짐", d["face_grow"].to_numpy(), "#f58518"),
-                             ("① 또는 ② (고른 기준)", combo, "#e45756")):
+                             ("② 얼굴 커짐", d["face_grow"].to_numpy(), "#f58518")):
         fpr, tpr, th, auc, pt = roc(score, yy)
         ax.plot(fpr, tpr, color=col, label=f"{name}  AUC {auc:.2f}")
         ax.plot(*pt, "o", color=col)
         roc_rows.append((name, auc, th))
-    p_now = ((d["neck_drop"] >= t_now[0]) | (d["face_grow"] >= t_now[1])).to_numpy()
-    ax.plot(p_now[~yy].mean(), p_now[yy].mean(), "k*", ms=12, label=f"지금 기준 ({t_now[0]:.0%}, {t_now[1]:.0%})")
+    p_now = (d["engine"] == "forward").to_numpy()             # 지금 엔진 그대로 (config 기준값 + 거르기)
+    ax.plot(p_now[~yy].mean(), p_now[yy].mean(), "k*", ms=13, label="지금 엔진 (기울기·숙임 거르기 포함)")
     ax.plot([0, 1], [0, 1], color="#ccc", ls=":")
     ax.set_xlabel("거북목이 아닌데 거북목으로 판정 (오탐률)")
     ax.set_ylabel("거북목을 거북목으로 판정 (민감도)")
-    ax.set_title("단서별 ROC (점 = 가장 잘 나누는 기준)")
+    ax.set_title("단서별 ROC (점 = 그 단서만 쓸 때 가장 잘 나누는 값)")
     ax.legend(fontsize=8, loc="lower right")
     fig.tight_layout()
     fig.savefig(out / "02_ROC.png", dpi=130)
     plt.close(fig)
 
-    # 3) 한 사람씩 빼고: 나머지로 기준 고르기 → 뺀 사람 시험
+    # 3) 규칙 비교: 예전 규칙 → 목만 → + 기울기 거르기 → + 숙임 거르기(지금 엔진)
+    nd, fg = d["neck_drop"].to_numpy(), d["face_grow"].to_numpy()
+    tilt_v = (d["tilt_engine"].isin(["left", "right"])).to_numpy()
+    lean_v = (d["chest_back_cm"] * 10 < -rules.body_lean_chest_mm).fillna(False).to_numpy() \
+        if rules.body_lean_chest_mm > 0 else np.zeros(len(d), bool)
+    t_n = rules.neck_drop_ratio
+    labels = d["label"].to_numpy()
+    rules_cmp = [("예전: 목 12% 또는 얼굴 8%", (nd >= 0.12) | (fg >= 0.08)),
+                 (f"목 {t_n:.0%}만", nd >= t_n),
+                 ("+ 기울기면 거북목 아님", (nd >= t_n) & ~tilt_v),
+                 ("+ 가슴 가까워지면 숙임 (지금 엔진)", p_now)]
+    cmp_rows = []
+    for name, pr in rules_cmp:
+        lean_lab, tilt_lab = np.isin(labels, ["상체숙임"]), np.isin(labels, list(TILT_TRUTH))
+        cmp_rows.append({"규칙": name, "균형 정확도": bal_acc(yy, pr), "민감도": pr[yy].mean(),
+                         "숙임 오탐": pr[lean_lab].mean(), "기울기 오탐": pr[tilt_lab].mean() if tilt_lab.any() else np.nan})
+    cmp = pd.DataFrame(cmp_rows)
+    cmp.to_csv(out / "07_규칙비교.csv", index=False, encoding="utf-8-sig")
+    fig, ax = plt.subplots(figsize=(11, 4.8))
+    x = np.arange(len(cmp))
+    for k, (col, c) in enumerate([("균형 정확도", "#4c78a8"), ("숙임 오탐", "#e45756"), ("기울기 오탐", "#b279a2")]):
+        v = cmp[col].to_numpy() * 100
+        ax.bar(x + (k - 1) * 0.27, v, 0.27, color=c, label=col)
+        for xi, vi in zip(x + (k - 1) * 0.27, v):
+            if np.isfinite(vi):
+                ax.text(xi, vi + 1.5, f"{vi:.0f}", ha="center", fontsize=8)
+    ax.set_xticks(x, cmp["규칙"], fontsize=9)
+    ax.set_ylim(0, 110)
+    ax.set_ylabel("%")
+    ax.legend(fontsize=8)
+    ax.set_title(f"거북목 규칙 비교 ({len(people)}명, 같은 데이터) — 거리센서 2개로 숙임을 거름")
+    fig.tight_layout()
+    fig.savefig(out / "07_규칙비교.png", dpi=130)
+    plt.close(fig)
+
+    # 4) 한 사람씩 빼고: 나머지로 목 높이 기준값을 고르고(지금 엔진 규칙 그대로) 뺀 사람으로 시험
+    def rule_pred(mask, t):
+        return (nd[mask] >= t) & ~tilt_v[mask] & ~lean_v[mask]
+
+    def best_t(mask):
+        yy_m = yy[mask]
+        scores = [(bal_acc(yy_m, rule_pred(mask, t)), t) for t in GRID1]
+        top = max(sc for sc, _ in scores)
+        return min((t for sc, t in scores if sc >= top - 0.005), key=lambda t: abs(t - t_n))
+
+    t_all = best_t(np.ones(len(d), bool))
     lrows = []
     d["pred_loso"] = False
     for p in people:
-        tr, te = d["person"] != p, d["person"] == p
-        if tr.sum() == 0 or d.loc[tr, "y"].nunique() < 2:
+        tr, te = (d["person"] != p).to_numpy(), (d["person"] == p).to_numpy()
+        if not tr.any() or len(set(yy[tr])) < 2:
             continue
-        a, b, _ = best_pair(d[tr], d.loc[tr, "y"], t_now)
-        pred = (d.loc[te, "neck_drop"] >= a) | (d.loc[te, "face_grow"] >= b)
+        t = best_t(tr)
+        pred = rule_pred(te, t)
         d.loc[te, "pred_loso"] = pred
-        yt = d.loc[te, "y"]
-        neg_move = d.loc[te, "label"].isin(["상체숙임", "등받이기댐"]) & ~yt
-        lrows.append({"person": p, "t1": a, "t2": b, "정확도": float((pred == yt).mean()), "균형": bal_acc(yt, pred),
+        yt, lab = yy[te], labels[te]
+        neg = np.isin(lab, ["상체숙임", "등받이기댐", *TILT_TRUTH]) & ~yt
+        lrows.append({"person": p, "t1": t, "정확도": float((pred == yt).mean()), "균형": bal_acc(yt, pred),
                       "민감도": float(pred[yt].mean()) if yt.any() else np.nan,
-                      "숙임·기댐 오탐": float(pred[neg_move].mean()) if neg_move.any() else np.nan})
+                      "숙임·기댐·기울기 오탐": float(pred[neg].mean()) if neg.any() else np.nan})
     loso = pd.DataFrame(lrows)
     loso.to_csv(out / "loso.csv", index=False, encoding="utf-8-sig")
 
-    # 4) 자세별 판정 비율: 지금 기준 / 데이터 기준(한 사람씩 빼고)
+    # 자세별 판정 비율: 예전 규칙 / 지금 엔진 / 한 사람씩 빼고
+    d["pred_old"] = rules_cmp[0][1]
     d["pred_now"] = p_now
-    rate = d.groupby("label")[["pred_now", "pred_loso"]].mean().reindex(order) * 100
-    rate.columns = [f"지금 기준 ({t_now[0]:.0%}·{t_now[1]:.0%})", "데이터 기준 (한 사람씩 빼고)"]
+    rate = d.groupby("label")[["pred_old", "pred_now", "pred_loso"]].mean().reindex(order) * 100
+    rate.columns = ["예전 규칙 (목 12%·얼굴 8%)", "지금 엔진", "지금 규칙, 한 사람씩 빼고 기준 고름"]
     rate.round(1).to_csv(out / "03_자세별판정.csv", encoding="utf-8-sig")
-    fig, ax = plt.subplots(figsize=(10, 4.8))
-    rate.plot.bar(ax=ax, color=["#9fb8d6", "#e45756"], width=0.75)
+    fig, ax = plt.subplots(figsize=(11, 4.8))
+    rate.plot.bar(ax=ax, color=["#bbb", "#e45756", "#f2a6a6"], width=0.8)
     ax.set_ylabel("거북목으로 판정한 비율 (%)")
-    ax.set_ylim(0, 100)
+    ax.set_ylim(0, 108)
     ax.tick_params(axis="x", rotation=0)
     for i, l in enumerate(rate.index):
-        ax.text(i, 96, "맞혀야 함" if l in POSITIVE else "오탐", ha="center", fontsize=8,
+        ax.text(i, 102, "맞혀야 함" if l in POSITIVE else "오탐", ha="center", fontsize=8,
                 color="#c00" if l in POSITIVE else "#555")
+    ax.legend(fontsize=8, loc="center right")
     ax.set_title("자세별 '거북목' 판정 비율 (거북목 자세는 높을수록, 나머지는 낮을수록 좋음)")
     fig.tight_layout()
     fig.savefig(out / "03_자세별판정.png", dpi=130)
@@ -449,30 +498,29 @@ def main() -> int:
         f"- 사람 {len(people)}명 ({', '.join(people)}), 판단 가능 프레임 {len(d)}개",
         f"- 정답: {'cva.csv(CVA < 48°) + ' if (folder / 'cva.csv').exists() else ''}수행 지시 (거북목 = {', '.join(POSITIVE)})",
         "",
-        "## 거북목 기준값",
+        "## 거북목 규칙 비교 (같은 데이터)",
         "",
-        "| | ① 목 높이 감소 | ② 얼굴 커짐 | 균형 정확도 (같은 데이터) |",
-        "|---|---|---|---|",
-        f"| 지금 config | {t_now[0]:.0%} | {t_now[1]:.0%} | {bal_acc(yy, p_now):.1%} |",
-        f"| 데이터로 고른 값 (전원) | {t1:.0%} | {t2:.0%} | {ba_all:.1%} |",
-        "",
-        "## 한 사람씩 빼고 시험 (처음 보는 사람 기준, 발표용 숫자)",
-        "",
+        "| 규칙 | 균형 정확도 | 민감도 | 숙임 오탐 | 기울기 오탐 |",
+        "|---|---|---|---|---|",
     ]
+    lines += [f"| {r['규칙']} | {pct(r['균형 정확도'])} | {pct(r['민감도'])} | {pct(r['숙임 오탐'])} | {pct(r['기울기 오탐'])} |"
+              for _, r in cmp.iterrows()]
+    lines += ["", "## 거북목: 한 사람씩 빼고 시험 (지금 규칙, 처음 보는 사람 기준 — 발표용 숫자)", ""]
     if len(loso):
-        lines += ["| 사람 | 고른 ① | 고른 ② | 정확도 | 균형 정확도 | 민감도 | 숙임·기댐 오탐 |", "|---|---|---|---|---|---|---|"]
+        lines += ["| 사람 | 고른 목 높이 기준 | 정확도 | 균형 정확도 | 민감도 | 숙임·기댐·기울기 오탐 |", "|---|---|---|---|---|---|"]
         for _, r in loso.iterrows():
-            lines.append(f"| {r['person']} | {r['t1']:.0%} | {r['t2']:.0%} | {pct(r['정확도'])} | {pct(r['균형'])} | "
-                         f"{pct(r['민감도'])} | {pct(r['숙임·기댐 오탐'])} |")
-        lines.append(f"| **평균** | | | {pct(loso['정확도'].mean())} | {pct(loso['균형'].mean())} | "
-                     f"{pct(loso['민감도'].mean())} | {pct(loso['숙임·기댐 오탐'].mean())} |")
+            lines.append(f"| {r['person']} | {r['t1']:.0%} | {pct(r['정확도'])} | {pct(r['균형'])} | "
+                         f"{pct(r['민감도'])} | {pct(r['숙임·기댐·기울기 오탐'])} |")
+        lines.append(f"| **평균** | | {pct(loso['정확도'].mean())} | {pct(loso['균형'].mean())} | "
+                     f"{pct(loso['민감도'].mean())} | {pct(loso['숙임·기댐·기울기 오탐'].mean())} |")
     else:
         lines.append("(사람이 2명 이상이어야 계산)")
-    lines += ["", "## ROC", "", "| 단서 | AUC | 가장 잘 나누는 값 |", "|---|---|---|"]
-    lines += [f"| {n} | {a:.2f} | {t:.3f} |" for n, a, t in roc_rows]
-    lines += ["", "## config.yaml에 넣을 값 (데이터로 정할 때)", "", "```yaml",
-              f"  neck_drop_ratio: {t1:.2f}", f"  face_grow_ratio: {t2:.2f}", "```", "",
-              "자세별 판정 비율·거리 보조: 03_자세별판정.csv, 04_거리보조.csv"] + tilt_lines
+    lines += ["", "## ROC (단서 하나씩)", "", "| 단서 | AUC | 가장 잘 나누는 값 |", "|---|---|---|"]
+    lines += [f"| {n} | {a_:.2f} | {t:.3f} |" for n, a_, t in roc_rows]
+    lines += ["", "## config.yaml (거북목)", "", "```yaml",
+              f"  neck_drop_ratio: {t_all:.2f}   # 지금 {t_n:.2f}, 전원 데이터로 고른 값 (지금 규칙 기준)",
+              f"  face_grow_ratio: {rules.face_grow_ratio:g}", f"  body_lean_chest_mm: {rules.body_lean_chest_mm:g}", "```", "",
+              "자세별 판정 비율·거리 보조·규칙 비교: 03_자세별판정.csv, 04_거리보조.csv, 07_규칙비교.csv"] + tilt_lines
     (out / "summary.md").write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines))
     print(f"\n저장: {args.out}/")

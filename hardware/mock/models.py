@@ -216,7 +216,7 @@ class PoseModel:
         if forward:
             c = px["nose"].copy()
             for k in HEAD_POINTS:
-                px[k] = c + (px[k] - c) * 1.15 + np.array([0, 0.04 * self.h])
+                px[k] = c + (px[k] - c) * 1.15 + np.array([0, 0.08 * self.h])   # 목 높이 약 25% 감소 (거북목 수집 3명: 23~41%)
         if tilt != TiltState.NONE.value:
             t = np.radians(8.0 if tilt == TiltState.LEFT.value else -8.0)
             rot = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])

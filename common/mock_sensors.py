@@ -107,7 +107,7 @@ class MockPoseSource(PoseSource):
         if self.head == HeadState.FORWARD.value:
             c = px["nose"].copy()
             for k in _HEAD:
-                px[k] = c + (px[k] - c) * 1.15 + np.array([0, 0.04 * self.h])
+                px[k] = c + (px[k] - c) * 1.15 + np.array([0, 0.08 * self.h])   # 목 높이 약 25% 감소 (거북목 수집 3명: 23~41%)
         if self.tilt != TiltState.NONE.value:
             deg = 8.0 if self.tilt == TiltState.LEFT.value else -8.0
             t = np.radians(deg)

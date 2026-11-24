@@ -9,7 +9,7 @@
 |---|---|
 | `ai/engine/sitsense_engine.py` | **AI 엔진.** `Sample` 하나 → 좌면·목·기울기·화면 거리 판정 (서버 `/current` 필드와 같은 이름) |
 | `ai/engine/seat.py` | 좌면 판정기. 기본 = 단계별(`StagedSeatClassifier`: ① 바른/나쁜 → ② 편향/다리꼬기 → ③ 체중 쪽). 엔진이 안에서 씀 |
-| `ai/engine/upper_body.py` | 목·기울기 규칙 판정. 엔진이 안에서 씀 |
+| `ai/engine/upper_body.py` | 목·기울기 규칙 판정 (거북목 = 목 높이 15%, 기울기·몸 전체 숙임이면 아님 — 기준과 근거는 `docs/judgement_rules.md` 1·2절). 엔진이 안에서 씀 |
 | `ai/camera/pose_source.py` | **카메라 부품.** Pi 카메라 + MediaPipe를 뒤에서 돌리고 가장 최근 상체 점을 줌 (`PoseSource`, 전원 켜기/끄기) |
 | `ai/models/final_staged_seat_model.joblib` | **좌면 모델 (기본).** 2차 11명 단계별 RF 3개 × 2벌(기준 1개 / 앉은 위치별 기준), 유지 4초·평균 2초·확신도 0.5. `python -m ai.classify.train_staged`로 다시 만듦 |
 | `ai/models/final_seat_model.joblib` | 예전 좌면 모델 (1차 3명, 5개 자세 한 번에). 파일을 넘기면 예전 방식으로 동작 |
@@ -19,7 +19,7 @@
 
 | | 판정 간격 | 떨림 줄이기 | 상태 바꾸기 전 유지 |
 |---|---|---|---|
-| 압력 (좌면) | 0.5초 | 최근 2초 확률 평균 | 4초 (+ 확신도 0.7, 모델 파일) |
+| 압력 (좌면) | 0.5초 | 최근 2초 확률 평균 | 4초 (+ 평균 확률 0.5 이상, 모델 파일) |
 | 카메라 (목·기울기) | 0.5초 | 최근 2초 중앙값 (`upper_rules.smooth_sec`) | 4초 (`thresholds.short_filter_sec`) |
 | 거리 | 0.5초 | 최근 2초 중앙값 | 4초 (`thresholds.short_filter_sec`) |
 
@@ -37,7 +37,7 @@ engine = SitSenseEngine(cfg)                 # cfg = load_config()
 res = engine.calibrate(samples)              # 기준 자세 10초 동안 모은 Sample 목록
 res.ok, res.reason                           # 실패 이유: pressure_low(덜 눌린 센서) / no_person(카메라에 사람 없음)
                                              # 실패하면 엔진은 이전 기준을 그대로 씀 (서버의 using_previous와 같음)
-engine.restore(b.pressure, b.distance_mm, b.pose)   # DB에 저장된 BaselineValue로 복원 (서버 재시작 등)
+engine.restore(b.pressure, b.distance_mm, b.pose, chest_mm=b.chest_mm, positions=b.positions)   # DB의 기준으로 복원
 
 r = engine.update(sample)                    # 매 순간. 0.1초든 0.5초든 상관없음
 r.seat_state, r.head_state, r.tilt_state     # 문자열, 이미 유지 시간을 거친 '확정' 상태
@@ -70,12 +70,12 @@ seat_conf, head_conf, tilt_conf = r.confidence["seat"], r.confidence["head"], r.
 deltas, cues, pending = r.deltas, r.cues, r.pending
 ```
 
-## 맞춰야 할 것
+## 맞춰야 할 것 (1~5 하드웨어 담당 반영 완료, 2026-11-24 확인: `check_real` 44/44)
 
-1. **유지 시간이 두 번 걸리지 않게.** 엔진 결과는 이미 확정 상태다 (좌면: 4초 유지 + 확신도 0.7, 목·기울기·거리: 4초).
+1. **유지 시간이 두 번 걸리지 않게.** 엔진 결과는 이미 확정 상태다 (좌면: 4초 유지 + 평균 확률 0.5 이상, 목·기울기·거리: 4초).
    서버 `StateFilter`를 또 거치면 8초 넘게 늦어진다. 엔진 결과를 그대로 쓰고 `pending`도 엔진 것을 쓴다.
-2. **기준 측정 실패 이유 `pressure_low` 추가.** 압력 기준은 모든 센서가 최대치(4095)의 25% 이상 눌려야 한다.
-   하나라도 덜 눌리면(측정 중 덜 앉음 등) 실패 → 직전 기준 유지. 앱 안내 문구 예: "방석에 깊숙이 바르게 앉아 다시 측정해 주세요".
+2. **기준 측정 실패 이유 `pressure_low` 추가.** 압력 기준은 최대치(4095)의 25% 이상 눌린 센서가 3개 이상(왼쪽·오른쪽 하나씩)이어야 한다
+   (2차 11명은 바르게 앉아도 1~3개가 덜 눌려서 '6개 전부'에서 바꿈). 아니면 실패 → 직전 기준 유지. 앱 안내 문구 예: "방석에 깊숙이 바르게 앉아 다시 측정해 주세요".
 3. **mock 압력 값 크기.** `hardware/mock/models.py`의 압력이 약 300~600인데, 실제 MCP3208 수집값은 바르게 앉으면 약 3200~3800이다.
    이대로 엔진에 넣으면 기준 측정이 `pressure_low`로 실패한다. mock 값을 실제 크기로 올려 주거나,
    mock 서버에서는 엔진 대신 기존 가짜 판정을 쓰는 옵션을 두는 게 좋다 (점검 스크립트는 7배로 키워서 시험함).

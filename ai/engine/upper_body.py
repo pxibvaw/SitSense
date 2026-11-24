@@ -7,16 +7,15 @@
     2. judge(): 지금 특징 − 기준 특징이 threshold를 넘으면 나쁜 자세
     3. StateFilter: 같은 상태가 short_filter_sec 이상 유지돼야 상태를 바꿈 (깜빡임 방지)
 
-거북목 (2026-11-22, 기준은 docs/judgement_rules.md 1절)
-    판정은 카메라: ① 목 높이 감소 ② 얼굴 커짐 중 1개 이상이면 거북목 (확신도 1개 0.6 · 2개 0.8)
-    거리센서 2개는 거북목일 때 확신도만 올림 (+0.15씩, 최대 0.95). 혼자 판정하거나 카메라 판정을 뒤집지 않음
-        A. 머리 내밀기: 머리가 assist_head_mm 이상 가까워짐 + 가슴은 assist_chest_mm 미만 가까워짐
-        B. 어깨 말림:   가슴이 assist_chest_mm 이상 멀어짐 + 머리는 ±assist_head_mm 안
-        상체 숙임·기댐(머리·가슴이 같이 움직임)은 보조 없음
-        가슴 거리가 없거나 막혔으면(chest_min_mm 미만) 예전 방식: 머리가 close_delta_mm 이상 가까우면 +0.15
+거북목 (2026-11-24 최종, 거북목 수집 3명 데이터로 정함 — docs/judgement_rules.md 1절, ai/analysis/neck_report)
+    1. 목 높이가 기준보다 neck_drop_ratio(15%) 이상 줄면 거북목 후보
+       (얼굴 커짐 단서는 데이터에서 구분력이 없어서(AUC 0.50) face_grow_ratio: 0 = 판정에 안 씀, 값은 deltas에 남김)
+    2. 후보라도 아래면 거북목 아님
+       - 좌우 기울기로 판정됨 → 기울이면 목이 짧아 보여서 (기울기만 알림)
+       - 가슴이 body_lean_chest_mm(3cm) 넘게 가까워짐 → 몸 전체를 숙인 것 (거리센서 2개를 둔 이유)
+    3. 거리센서 보조로 확신도 +0.15 (A 머리만 가까워짐 / B 가슴만 뒤로 / 가슴 센서 없으면 머리 10cm)
+    수집 3명: 지금 규칙 균형 정확도 96% (예전 '목 12% 또는 얼굴 8%' 74%: 숙임·기울기를 100% 거북목으로 판정)
     5cm·3cm = 2차 11명 바른자세 중 2초 중앙값의 자연 흔들림(95%: 머리 3.4cm, 가슴 2.5cm)보다 크게
-
-카메라 기준값(12%·8%·기울기)은 팀 테스트 경험값 (거북목 수집 데이터로 확인 예정).
 """
 from __future__ import annotations
 
@@ -32,17 +31,21 @@ from common.schema import HeadState, TiltState
 # ---------------------------------------------------------------------------
 # 기준값
 # ---------------------------------------------------------------------------
+OPTIONAL_ZERO = {"face_grow_ratio", "body_lean_chest_mm"}     # 0이면 그 단서·거르기를 쓰지 않음
+
+
 @dataclass
 class UpperRules:
     min_visibility: float = 0.5        # 이보다 안 보이는 점이 있으면 판단하지 않음
-    neck_drop_ratio: float = 0.12      # 목 높이 비율이 기준보다 12% 이상 줄면 거북목 단서
-    face_grow_ratio: float = 0.08      # 얼굴 크기 비율이 기준보다 8% 이상 커지면 거북목 단서
+    neck_drop_ratio: float = 0.15      # 목 높이 비율이 기준보다 15% 이상 줄면 거북목 후보
+    face_grow_ratio: float = 0.0       # 얼굴 크기 비율 단서 (0 = 판정에 안 씀)
+    body_lean_chest_mm: float = 30.0   # 가슴이 이만큼 넘게 가까워지면 몸 전체 숙임 → 거북목 아님
     close_delta_mm: float = 100.0      # 머리 거리가 기준보다 10cm 이상 가까워지면 (가슴 거리가 없을 때만, 확신도 보조)
     assist_head_mm: float = 50.0       # 거리 보조: 머리 변화 기준 5cm (자연 흔들림 3.4cm보다 크게)
     assist_chest_mm: float = 30.0      # 거리 보조: 가슴 변화 기준 3cm (자연 흔들림 2.5cm보다 크게)
     chest_min_mm: float = 50.0         # 가슴 거리가 이보다 짧으면(0 포함) 측정 실패로 보고 쓰지 않음
     shoulder_angle_deg: float = 5.0    # 어깨 선이 기준보다 5도 이상 기울면
-    head_angle_deg: float = 7.0        # 눈 선이 기준보다 7도 이상 기울면
+    head_angle_deg: float = 8.0        # 눈 선이 기준보다 8도 이상 기울면
     head_offset: float = 0.10          # 코가 기준보다 어깨 너비의 10% 이상 옆으로 가면
     smooth_sec: float = 2.0            # 특징을 최근 몇 초의 중앙값으로 부드럽게 할지 (압력 2초 평균과 같게)
 
@@ -58,8 +61,10 @@ class UpperRules:
             raise ValueError(f"config.yaml upper_rules에 모르는 항목: {sorted(unknown)}")
         rules = cls(**{k: float(v) for k, v in src.items()})
         for f in fields(rules):
-            if getattr(rules, f.name) <= 0:
-                raise ValueError(f"upper_rules.{f.name}는 0보다 커야 함")
+            v = getattr(rules, f.name)
+            if v < 0 or (v == 0 and f.name not in OPTIONAL_ZERO):
+                raise ValueError(f"upper_rules.{f.name}는 0보다 커야 함" +
+                                 (" (0 = 끔)" if f.name in OPTIONAL_ZERO else ""))
         return rules
 
 
@@ -195,28 +200,10 @@ def judge(feat: UpperFeatures | None, base: Baseline, rules: UpperRules,
     if feat is None or not base.ready:
         return unknown_judgement()
     b = base.value
+    deltas: dict[str, float] = {}
+    cues: dict[str, bool] = {}
 
-    # --- 거북목: 카메라(목 높이 ↓, 얼굴 크기 ↑)가 판정, 거리센서 2개는 확신도 보조 ---
-    neck_drop = (b.neck_height - feat.neck_height) / b.neck_height if b.neck_height > 0 else 0.0
-    face_grow = feat.face_ratio / b.face_ratio - 1 if b.face_ratio > 0 else 0.0
-    cues = {
-        "neck_drop": neck_drop >= rules.neck_drop_ratio,
-        "face_grow": face_grow >= rules.face_grow_ratio,
-    }
-    deltas = {"neck_drop": neck_drop, "face_grow": face_grow}
-    assist, dist_deltas = distance_assist(base, rules, distance_mm, chest_mm)
-    deltas.update(dist_deltas)
-    cues.update({k: assist == k for k in ("head_only", "chest_back", "closer")})
-
-    cam_hits = cues["neck_drop"] + cues["face_grow"]
-    if cam_hits == 0:
-        # 카메라 단서가 없으면 거리만 변해도 거북목 아님 (의자를 당기거나 숙였을 수 있음)
-        head, head_conf = HeadState.NORMAL, 0.8
-    else:
-        head = HeadState.FORWARD
-        head_conf = min({1: 0.6, 2: 0.8}[cam_hits] + (0.15 if assist else 0.0), 0.95)
-
-    # --- 좌우 기울기: 어깨 선, 눈 선, 코 좌우 위치 (+ 왼쪽 / - 오른쪽) ---
+    # --- 좌우 기울기 (먼저: 거북목 판정이 기울기 결과를 씀): 어깨 선, 눈 선, 코 좌우 위치 (+ 왼쪽 / - 오른쪽) ---
     scores = {
         "shoulder_angle": (feat.shoulder_angle - b.shoulder_angle) / rules.shoulder_angle_deg,
         "head_angle": (feat.head_angle - b.head_angle) / rules.head_angle_deg,
@@ -238,6 +225,29 @@ def judge(feat: UpperFeatures | None, base: Baseline, rules: UpperRules,
         tilt_conf = {1: 0.6, 2: 0.8, 3: 0.95}[agree]
         if agree < len(over):                  # 단서끼리 방향이 엇갈리면 확신도 낮춤
             tilt_conf = 0.4
+
+    # --- 거북목: 목 높이 ↓ (카메라), 기울기·몸 전체 숙임이면 아님, 거리센서는 확신도 보조 ---
+    neck_drop = (b.neck_height - feat.neck_height) / b.neck_height if b.neck_height > 0 else 0.0
+    face_grow = feat.face_ratio / b.face_ratio - 1 if b.face_ratio > 0 else 0.0
+    deltas.update({"neck_drop": neck_drop, "face_grow": face_grow})
+    cues["neck_drop"] = neck_drop >= rules.neck_drop_ratio
+    cues["face_grow"] = rules.face_grow_ratio > 0 and face_grow >= rules.face_grow_ratio
+    assist, dist_deltas = distance_assist(base, rules, distance_mm, chest_mm)
+    deltas.update(dist_deltas)
+    cues.update({k: assist == k for k in ("head_only", "chest_back", "closer")})
+    cam_hits = cues["neck_drop"] + cues["face_grow"]
+    cues["tilt_override"] = bool(cam_hits) and tilt in (TiltState.LEFT, TiltState.RIGHT)
+    chest_back = dist_deltas.get("chest_back_mm")
+    cues["body_lean"] = (bool(cam_hits) and rules.body_lean_chest_mm > 0 and chest_back is not None
+                         and -chest_back > rules.body_lean_chest_mm)
+    if cam_hits == 0:
+        # 카메라 단서가 없으면 거리만 변해도 거북목 아님 (의자를 당기거나 숙였을 수 있음)
+        head, head_conf = HeadState.NORMAL, 0.8
+    elif cues["tilt_override"] or cues["body_lean"]:
+        head, head_conf = HeadState.NORMAL, 0.7     # 목이 짧아 보이는 이유가 기울기·숙임
+    else:
+        head = HeadState.FORWARD
+        head_conf = min({1: 0.65, 2: 0.8}[cam_hits] + (0.15 if assist else 0.0), 0.95)
 
     return UpperJudgement(head, tilt, min(head_conf, 1.0), tilt_conf, deltas, cues)
 

@@ -49,17 +49,18 @@ camera:               # 정면, 모니터 위 (HC-SR04와 함께 설치)
   fps: 5              # Pi 4에서는 2~5fps가 현실적
   model_complexity: 1 # MediaPipe 모델 0: lite(빠름, Pi용, 첫 실행 때 다운로드) / 1: full(기본) / 2: heavy
 
-upper_rules:          # [AI] 상체 판단 기준 — 근거·상태는 docs/judgement_rules.md 1·2절
+upper_rules:          # [AI] 상체 판단 기준 (2026-11-24 최종) — 근거·상태는 docs/judgement_rules.md 1·2절
   min_visibility: 0.5       # 코·눈·어깨 중 이보다 안 보이는 점이 있으면 판단하지 않음
-  neck_drop_ratio: 0.12     # 🧪 목 높이 비율이 기준보다 12% 이상 줄면 거북목 단서 (팀 테스트 경험값)
-  face_grow_ratio: 0.08     # 🧪 얼굴 크기 비율이 기준보다 8% 이상 커지면 거북목 단서 (팀 테스트 경험값)
+  neck_drop_ratio: 0.15     # ✅ 목 높이 비율이 기준보다 15% 이상 줄면 거북목 후보 (거북목 수집 3명, neck_report)
+  face_grow_ratio: 0        # ✅ 0 = 얼굴 커짐 단서 안 씀 (수집 데이터에서 구분력 없음, AUC 0.50)
+  body_lean_chest_mm: 30    # ✅ 가슴이 3cm 넘게 가까워지면 몸 전체 숙임 → 거북목 아님 (수집: 숙임 오탐 100% → 4%)
   assist_head_mm: 50        # 거북목 확신도 보조: 머리 변화 5cm (2차 11명 바른자세 자연 흔들림 3.4cm보다 크게)
   assist_chest_mm: 30       # 거북목 확신도 보조: 가슴 변화 3cm (자연 흔들림 2.5cm보다 크게). A 머리만 가까워짐 / B 가슴만 뒤로
   chest_min_mm: 50          # 가슴 거리가 5cm 미만(0 포함)이면 측정 실패로 보고 안 씀. 가슴 센서는 고정이라 몸과 17cm 근처지만
                             # 2차 데이터에서 17cm 근처인 사람도 자세에 따라 9~24cm 움직임 → 20cm 기준이면 잘못 버려서 낮춤
-  shoulder_angle_deg: 5.0   # 어깨 선이 기준보다 5도 이상 기울면 기울기 단서
-  head_angle_deg: 7.0       # 눈 선이 기준보다 7도 이상 기울면 기울기 단서
-  head_offset: 0.10         # 코가 기준보다 어깨 너비의 10% 이상 옆으로 가면 기울기 단서
+  shoulder_angle_deg: 5.0   # ✅ 어깨 선이 기준보다 5도 이상 기울면 기울기 단서 (수집 3명으로 확인)
+  head_angle_deg: 8.0       # ✅ 눈 선이 기준보다 8도 이상 기울면 기울기 단서 (수집 3명: 7→8도)
+  head_offset: 0.10         # ✅ 코가 기준보다 어깨 너비의 10% 이상 옆으로 가면 기울기 단서 (수집 3명으로 확인)
   smooth_sec: 2.0           # 특징을 최근 2초 중앙값으로 부드럽게 (점 떨림 완화, 압력 2초 평균과 같게)
 
 thresholds:

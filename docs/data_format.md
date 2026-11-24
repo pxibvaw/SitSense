@@ -25,7 +25,7 @@
 - 한 순간의 값은 `SensorHub.read()`가 `Sample` 하나로 묶어 준다 (압력·거리·카메라 동기화).
 - 카메라는 초당 약 5장이라 센서(10Hz)보다 느리다. `Sample`에는 가장 최근 카메라 결과가 들어가고,
   `pose.ts`로 몇 초 전 값인지 알 수 있다.
-- FSR 채널 번호 ↔ 방석 위치는 `config.yaml`의 `pressure.positions` (배치도 확정 후 수정).
+- FSR 채널 번호 ↔ 방석 위치는 `config.yaml`의 `pressure.positions` (지금 방석으로 확정, 2026-11-23: CH0 앞왼 · CH1 뒤왼 · CH3 중왼 · CH4 뒤오 · CH6 중오 · CH7 앞오).
 
 ### 카메라 점 7개 (+ 목)
 
