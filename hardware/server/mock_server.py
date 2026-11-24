@@ -280,12 +280,14 @@ class MockRuntime:
                 self.jobs.run(self.clock.now())
             return change
 
-    def reset_records(self) -> dict[str, int]:
-        """기록만 삭제 (설정·기준 자세 유지). 시각 동기화도 지워서 앱이 다시 보내게 한다"""
+    def reset_records(self, baselines: bool = False) -> dict[str, int]:
+        """기록만 삭제 (설정 유지, 기준 자세는 baselines=True일 때만 지움). 시각 동기화도 지워서 앱이 다시 보내게 한다"""
         with self.lock:
             if self.session.state is not SessionState.IDLE:
                 raise SessionError("SESSION_ACTIVE", "세션이 있는 동안에는 기록을 지울 수 없음. 정지한 뒤 다시 요청하세요")
-            deleted = self.recorder.reset_records() if self.recorder else {}
+            deleted = self.recorder.reset_records(baselines) if self.recorder else {}
+            if baselines:
+                self.current_baseline = None
             self.clock.unsync()
             self.clock.min_time = None
             self.session = SessionController()
@@ -629,10 +631,10 @@ def create_app(cfg: dict, scenario: str = "demo", loop: bool = True, seed: int |
     @app.post("/records/reset", response_model=RecordsResetResult, tags=["기록"], responses=ERRORS,
               summary="기록 초기화 (설정·기준 자세는 유지). 세션이 없을 때만, 확인 문구 필요")
     def records_reset(req: RecordsReset):
-        if req.confirm != "DELETE_RECORDS":
-            fail(422, "CONFIRM_REQUIRED", "confirm에 'DELETE_RECORDS'를 넣어야 기록을 지움")
+        if req.confirm not in ("DELETE_RECORDS", "DELETE_ALL_RECORDS"):
+            fail(422, "CONFIRM_REQUIRED", "confirm에 'DELETE_RECORDS'(기준 자세 유지) 또는 'DELETE_ALL_RECORDS'(기준 자세까지 삭제)를 넣어야 함")
         try:
-            deleted = runtime.reset_records()
+            deleted = runtime.reset_records(baselines=req.confirm == "DELETE_ALL_RECORDS")
         except SessionError as e:
             fail(409, e.code, str(e))
         return {"deleted": deleted, "resync_required": True}

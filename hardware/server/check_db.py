@@ -254,6 +254,10 @@ def main() -> int:
               and env7.one("SELECT COUNT(*) FROM baselines") > 0
               and env7.one("SELECT COUNT(*) FROM sensor_layouts") == 2,
               f"baselines {env7.one('SELECT COUNT(*) FROM baselines')}줄")
+        r = env7.c.post("/records/reset", json={"confirm": "DELETE_ALL_RECORDS"})
+        check("DELETE_ALL_RECORDS → 기준 자세까지 삭제", r.status_code == 200 and "baselines" in r.json()["deleted"]
+              and env7.one("SELECT COUNT(*) FROM baselines") == 0 and env7.one("SELECT COUNT(*) FROM settings") == 7,
+              r.json().get("deleted", {}).get("baselines"))
         r = env7.sync(last_seen - 3600)
         check("초기화 뒤에는 이전 시각으로도 동기화 가능 (복구)", r.status_code == 200, r.status_code)
 

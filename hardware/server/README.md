@@ -84,7 +84,7 @@ python -m hardware.server.mock_server --export-openapi   # schemas.py를 고친 
 | GET | `/time` | 동기화 상태, `boot_id` (바뀌었거나 `synced=false`면 다시 동기화) |
 | GET | `/session` | 세션 상태·경과 시간·착석 시간·센서 전원 |
 | POST | `/session/start` · `/pause` · `/resume` · `/stop` | 측정 시작(기준 자세 10초 포함)·일시정지·재개·정지 |
-| POST | `/records/reset` | 기록 초기화 `{"confirm": "DELETE_RECORDS"}` (설정·기준 자세 유지, 세션 없을 때만) |
+| POST | `/records/reset` | 기록 초기화 `{"confirm": "DELETE_RECORDS"}` (설정·기준 자세 유지) 또는 `"DELETE_ALL_RECORDS"` (기준 자세까지 삭제). 세션 없을 때만 |
 | GET | `/reports/home?date=` | 홈 요약: 정상 비율·총 착석·하루 평균 자세·좌우 편향·목표 4종 오늘/어제 (기본 오늘) |
 | GET | `/reports/daily?date=YYYY-MM-DD` | 일간 리포트 (지난 날은 자정 요약, 오늘은 실시간) |
 | GET | `/reports/weekly?start=YYYY-MM-DD` | 주간 리포트 (월~일, 지난주 비교 5개, 시간대별 패턴) |

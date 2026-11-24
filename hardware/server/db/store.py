@@ -431,13 +431,15 @@ class Recorder:
         self._last_flush = ts
 
     # --- 기록 초기화 · 종료 -------------------------------------------------------
-    def reset_records(self) -> dict[str, int]:
-        """기록만 삭제 (설정·기준 자세·센서 배치는 유지). 세션이 없을 때만 부른다"""
+    def reset_records(self, baselines: bool = False) -> dict[str, int]:
+        """기록만 삭제 (설정·센서 배치는 유지, 기준 자세는 baselines=True일 때만 지움). 세션이 없을 때만 부른다"""
         out = {}
 
         def w(c):
             for t in RECORD_TABLES:
                 out[t] = c.execute(f"DELETE FROM {t}").rowcount
+            if baselines:
+                out["baselines"] = c.execute("DELETE FROM baselines").rowcount
             c.execute("DELETE FROM meta WHERE key = 'last_seen'")
         self._tx(w)
         self._reset_memory()

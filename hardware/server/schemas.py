@@ -289,7 +289,7 @@ class SessionStatus(BaseModel):
 
 class RecordsReset(BaseModel):
     """기록 초기화 요청 — 앱에서 확인 절차를 거친 뒤 보낸다"""
-    confirm: str = Field(..., description="반드시 'DELETE_RECORDS'", examples=["DELETE_RECORDS"])
+    confirm: str = Field(..., description="'DELETE_RECORDS' (기준 자세 유지) 또는 'DELETE_ALL_RECORDS' (기준 자세까지 삭제)", examples=["DELETE_RECORDS"])
 
 
 class RecordsResetResult(BaseModel):

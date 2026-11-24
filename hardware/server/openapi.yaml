@@ -1567,7 +1567,7 @@ components:
         confirm:
           type: string
           title: Confirm
-          description: 반드시 'DELETE_RECORDS'
+          description: "'DELETE_RECORDS' (기준 자세 유지) 또는 'DELETE_ALL_RECORDS' (기준 자세까지 삭제)"
           examples:
           - DELETE_RECORDS
       type: object
