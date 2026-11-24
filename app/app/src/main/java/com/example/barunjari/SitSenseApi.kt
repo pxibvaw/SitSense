@@ -103,8 +103,8 @@ internal fun baselineMessage(state: String, reason: String): String = when (stat
 }
 
 internal fun seatSideLabel(value: String): String? = when (value) {
-    "left" -> "체중 방향 · 왼쪽 (확정)"
-    "right" -> "체중 방향 · 오른쪽 (확정)"
+    "left" -> "왼쪽 (확정)"
+    "right" -> "오른쪽 (확정)"
     else -> null
 }
 

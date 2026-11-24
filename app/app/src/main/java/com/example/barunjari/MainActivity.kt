@@ -56,7 +56,7 @@ private val Background = Color(0xFFF5F6F6)
 private val Line = Color(0xFFE5E7EB)
 private val Danger = Color(0xFFE85050)
 private val PlayerInk = Color(0xFF0F3D22)
-private const val OnboardingDesignVersion = 4
+private const val OnboardingDesignVersion = 6
 
 private enum class Page { ONBOARDING, GOALS, CONNECTION, CALIBRATION, POSITION_CALIBRATION, HOME, REPORT, FEEDBACK, SETTINGS, DEVICE, MEASUREMENT }
 private val goalNames = listOf("다리 꼬기 줄이기", "목 앞으로 내미는 자세 줄이기", "한쪽으로 기대는 습관 줄이기", "장시간 연속 착석 줄이기")
@@ -72,9 +72,10 @@ class MainActivity : ComponentActivity() {
         )
         val prefs = getSharedPreferences("sitsense", MODE_PRIVATE)
         setContent {
-            var onboardingGeneration by rememberSaveable { mutableIntStateOf(0) }
+            var onboardingGeneration by key(OnboardingDesignVersion) { rememberSaveable { mutableIntStateOf(0) } }
             key(OnboardingDesignVersion, onboardingGeneration) {
                 SitSenseApp(
+                    initialPage = if (onboardingGeneration == 0) Page.ONBOARDING else Page.GOALS,
                     savedGoals = prefs.getString("goals", "0,1") ?: "0,1",
                     saveOnboarding = { prefs.edit().putBoolean("first_run_done", true)
                         .putInt("onboarding_design_version", OnboardingDesignVersion).apply() },
@@ -91,13 +92,13 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun SitSenseApp(
+    initialPage: Page,
     savedGoals: String,
     saveOnboarding: () -> Unit,
     saveGoals: (Set<Int>) -> Unit,
     onRecordsReset: () -> Unit
 ) {
-    // Saved completion must not skip setup on a fresh launch; recreation retains this session.
-    var page by rememberSaveable { mutableStateOf(Page.GOALS) }
+    var page by rememberSaveable { mutableStateOf(initialPage) }
     var onboardingComplete by rememberSaveable { mutableStateOf(false) }
     var calibrateBeforePlayback by rememberSaveable { mutableStateOf(false) }
     var playAfterCalibration by rememberSaveable { mutableStateOf(false) }
@@ -107,7 +108,6 @@ private fun SitSenseApp(
     var connected by rememberSaveable { mutableStateOf(false) }
     var alerts by rememberSaveable { mutableStateOf(true) }
     var standAlert by rememberSaveable { mutableStateOf(true) }
-    var threshold by rememberSaveable { mutableIntStateOf(5) }
     var standMinutes by rememberSaveable { mutableIntStateOf(50) }
     var weekly by rememberSaveable { mutableStateOf(false) }
     var selectedDate by rememberSaveable { mutableLongStateOf(ReportDates.today()) }
@@ -115,7 +115,6 @@ private fun SitSenseApp(
     var measurementMillis by rememberSaveable { mutableLongStateOf(0L) }
     var measurementBaseMillis by rememberSaveable { mutableLongStateOf(0L) }
     var measurementStartedAt by rememberSaveable { mutableLongStateOf(0L) }
-    var showAlertCard by rememberSaveable { mutableStateOf(true) }
     var dialog by rememberSaveable { mutableStateOf("") }
     val prefs = LocalContext.current.getSharedPreferences("sitsense", android.content.Context.MODE_PRIVATE)
     var serverAddress by rememberSaveable {
@@ -148,6 +147,16 @@ private fun SitSenseApp(
         }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
+    }
+    val postureAlertTracker = remember { PostureAlertTracker() }
+    var postureAlert by remember { mutableStateOf<PostureAlert?>(null) }
+    LaunchedEffect(current, connected, foreground, calibrating, measurementStatus) {
+        if (connected && foreground && !calibrating && measurementStatus == MeasurementStatus.RUNNING) {
+            postureAlertTracker.record(current.optDouble("ts"), current.alertPostures())
+        } else {
+            postureAlertTracker.reset()
+        }
+        postureAlert = postureAlertTracker.alert()
     }
     val scope = rememberCoroutineScope()
     fun command(action: suspend () -> Unit) {
@@ -265,8 +274,15 @@ private fun SitSenseApp(
         client.sync()
         updateMeasurement(client.request("/session/start", JSONObject()))
     }
+    fun openDeviceSetup() {
+        editingGoals = false
+        page = if (onboardingComplete) Page.CONNECTION else Page.GOALS
+    }
     fun toggleMeasurement() {
-        if (api == null || !connected) { page = Page.CONNECTION; return }
+        if (api == null || !connected) {
+            openDeviceSetup()
+            return
+        }
         command {
             val client = api!!
             when (client.request("/session").optString("state")) {
@@ -293,6 +309,11 @@ private fun SitSenseApp(
         }
     }
 
+    fun leaveGoals() {
+        page = if (editingGoals) Page.SETTINGS else Page.ONBOARDING
+        editingGoals = false
+    }
+    BackHandler(enabled = page == Page.GOALS, onBack = ::leaveGoals)
     BackHandler(enabled = page == Page.MEASUREMENT) { page = Page.HOME }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Green, background = Background, surface = Color.White)) {
@@ -303,7 +324,7 @@ private fun SitSenseApp(
                 Page.GOALS -> GoalsScreen(
                     selected = goals,
                     editing = editingGoals,
-                    onBack = { page = if (editingGoals) Page.SETTINGS else Page.ONBOARDING },
+                    onBack = ::leaveGoals,
                     onToggle = { index ->
                         goals = if (index in goals) goals - index else if (goals.size < 2) goals + index else goals
                     },
@@ -358,13 +379,18 @@ private fun SitSenseApp(
                         when (page) {
                             Page.HOME, Page.MEASUREMENT -> ServerHome(
                                 serverStatus, current, layout, report, apiError.ifEmpty { reportError },
+                                postureAlert = postureAlert.takeIf { alerts && measurementStatus == MeasurementStatus.RUNNING },
+                                dismissPostureAlert = { posture ->
+                                    postureAlertTracker.dismiss(posture)
+                                    postureAlert = postureAlertTracker.alert()
+                                },
                                 openFeedback = { page = Page.FEEDBACK }
                             )
                             Page.REPORT -> ServerReport(report, reportError, weekly, { weekly = it }, selectedDate, { selectedDate = it })
                             Page.FEEDBACK -> ServerGoals(report, reportError, goals) { editingGoals = true; page = Page.GOALS }
                             Page.SETTINGS -> SettingsScreen(
                                 connected, goals, alerts, { alerts = it }, standAlert, { standAlert = it },
-                                threshold, standMinutes,
+                                standMinutes,
                                 serverStatus = serverStatus,
                                 showPositionCalibration = connected && serverSession.optJSONObject("baseline")?.has("positions_done") == true,
                                 onAction = { action ->
@@ -372,8 +398,10 @@ private fun SitSenseApp(
                                         "기기 재연결" -> page = Page.DEVICE
                                         "개선 목표" -> { editingGoals = true; page = Page.GOALS }
                                         "기준 자세 다시 측정" -> {
-                                            if (!connected) onboardingComplete = false
-                                            page = if (connected) Page.CALIBRATION else Page.CONNECTION
+                                            if (connected) page = Page.CALIBRATION else {
+                                                onboardingComplete = false
+                                                openDeviceSetup()
+                                            }
                                         }
                                         "앞·뒤 기준 추가 측정" -> { commandError = ""; page = Page.POSITION_CALIBRATION }
                                         else -> dialog = action
@@ -382,7 +410,7 @@ private fun SitSenseApp(
                             )
                             Page.DEVICE -> ServerDevice(serverStatus, connected, busy, {
                                 if (connected) { command { api!!.request("/session/stop", JSONObject()); connected = false; api = null } }
-                                else page = Page.CONNECTION
+                                else openDeviceSetup()
                             })
                             else -> Unit
                         }
@@ -407,7 +435,6 @@ private fun SitSenseApp(
                 title = { Text(dialog) },
                 text = {
                     when (dialog) {
-                        "알림 기준" -> ChoiceColumn(listOf(3, 5, 10).map { "$it 분 이상 지속 시" }, threshold) { threshold = it }
                         "일어나기 알림" -> ChoiceColumn(listOf(30, 50, 60).map { "$it 분 연속 착석 시" }, standMinutes) { standMinutes = it }
                         "기록 내보내기" -> Text("서버에 CSV 내보내기 API가 아직 제공되지 않았어요.")
                         "기록 초기화" -> Text("연결된 서버의 모든 측정 기록, 리포트, 저장된 기준 자세를 삭제해요. 진행 중인 측정은 종료되고 목표 선택부터 다시 시작해요. 앱에서 이 작업을 되돌릴 수 없어요.")
@@ -422,7 +449,7 @@ private fun SitSenseApp(
                     }) { Text(if (dialog == "기록 초기화") "모두 삭제" else "확인") }
                 },
                 dismissButton = {
-                    if (dialog in listOf("알림 기준", "일어나기 알림", "기록 초기화")) {
+                    if (dialog in listOf("일어나기 알림", "기록 초기화")) {
                         TextButton(onClick = { dialog = "" }) { Text("취소") }
                     }
                 }
@@ -668,19 +695,7 @@ private fun HomeScreen(goals: Set<Int>, alertVisible: Boolean, dismissAlert: () 
                 ProgressRing(DemoPostureReport.normalPercent, Modifier.size(88.dp), Color.White, Color.White.copy(alpha = .25f), 9f)
             }
         }
-        if (alertVisible) item {
-            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Ink).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(38.dp).clip(RoundedCornerShape(12.dp)).background(Color.White.copy(alpha = .1f)), contentAlignment = Alignment.Center) {
-                    Icon(R.drawable.alert, Modifier.size(19.dp), Green)
-                }
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Label("거북목 자세가 5분째 이어지고 있어요", 13, Color.White, FontWeight.Bold)
-                    Label("목과 어깨를 가볍게 움직여 보세요", 12, Soft)
-                }
-                Box(Modifier.size(24.dp).clickable(onClick = dismissAlert), contentAlignment = Alignment.Center) { Icon(R.drawable.x, Modifier.size(17.dp), Soft) }
-            }
-        }
+        if (alertVisible) item { PostureAlertBanner(PostureAlert(AlertPosture.NECK, PostureAlertMinutes), dismissAlert) }
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Label("지금 자세", 17, Ink, FontWeight.Bold, Modifier.weight(1f))
@@ -754,9 +769,23 @@ private fun HomeScreen(goals: Set<Int>, alertVisible: Boolean, dismissAlert: () 
 }
 
 @Composable
-internal fun PressureCell(value: Int?, modifier: Modifier = Modifier) {
-    val shade = when { value == null -> Background; value >= 30 -> Green; value >= 20 -> Color(0xFF77CAA0); value >= 14 -> Color(0xFF93D4AB); else -> Color(0xFFB6E3C5) }
-    Box(modifier.heightIn(min = 35.dp).clip(RoundedCornerShape(8.dp)).background(shade))
+internal fun PressureCell(value: Int?, modifier: Modifier = Modifier, readingLabel: String? = null) {
+    val shade = when {
+        value == null -> Background
+        value >= 30 -> Green
+        value >= 20 -> Green.copy(alpha = .57f)
+        value >= 17 -> Green.copy(alpha = .41f)
+        else -> Green.copy(alpha = .31f)
+    }
+    val textColor = when {
+        value == null -> Ink
+        value >= 20 -> Color.White
+        else -> Color(0xFF0E7A34)
+    }
+    Box(modifier.heightIn(min = 35.dp).clip(RoundedCornerShape(8.dp)).background(shade),
+        contentAlignment = Alignment.Center) {
+        readingLabel?.let { Label(it, 12, textColor, FontWeight.Bold, align = TextAlign.Center) }
+    }
 }
 
 @Composable
@@ -1029,7 +1058,6 @@ private fun SettingsScreen(
     setAlerts: (Boolean) -> Unit,
     standAlert: Boolean,
     setStandAlert: (Boolean) -> Unit,
-    threshold: Int,
     standMinutes: Int,
     serverStatus: JSONObject,
     showPositionCalibration: Boolean,
@@ -1078,7 +1106,7 @@ private fun SettingsScreen(
         item {
             DesignCard(Modifier.fillMaxWidth(), padding = 13) {
                 SettingRow("실시간 자세 알림", "", R.drawable.bell, toggle = alerts, onToggle = setAlerts)
-                SettingRow("알림 기준", "${threshold}분 이상 지속 시 ›", R.drawable.clock, onClick = { onAction("알림 기준") })
+                SettingRow("알림 기준", "${PostureAlertMinutes}분 이상 지속 시", R.drawable.clock)
                 SettingRow("일어나기 알림", "${standMinutes}분 연속 착석 시", R.drawable.walk, toggle = standAlert, onToggle = setStandAlert, onClick = { onAction("일어나기 알림") })
             }
         }
@@ -1263,43 +1291,108 @@ private fun MeasurementScreen(status: MeasurementStatus, millis: Long, onBack: (
 }
 
 @Composable
-internal fun DesignCard(modifier: Modifier = Modifier, padding: Int = 18, content: @Composable ColumnScope.() -> Unit) {
-    val shape = RoundedCornerShape(22.dp)
+internal fun DesignCard(
+    modifier: Modifier = Modifier,
+    padding: Int = 18,
+    cornerRadius: Int = 22,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(cornerRadius.dp)
     Column(modifier.shadow(4.dp, shape, ambientColor = Color.Black.copy(alpha = .04f), spotColor = Color.Black.copy(alpha = .04f))
         .clip(shape).background(Color.White).padding(padding.dp), content = content)
 }
 
 @Composable
-private fun PostureGauges() {
-    Column(Modifier.fillMaxWidth().height(112.dp).clip(RoundedCornerShape(12.dp)).background(Background).padding(8.dp)) {
+internal fun PostureGauges(
+    headState: String? = "normal",
+    tiltState: String? = "none",
+    distanceMm: Double? = 520.0,
+    distanceLevel: String = LivePostureWaiting,
+    distanceCaution: Boolean = false,
+    headCountdown: String? = null,
+    tiltCountdown: String? = null
+) {
+    val neckCaution = headState == "forward" || headState == "forward_head"
+    val tilted = tiltState in listOf("left", "right", "tilt_left", "tilt_right")
+    val neckLabel = when (headState) {
+        "normal" -> "목 정상"
+        "forward", "forward_head" -> "거북목 자세"
+        else -> "목 대기"
+    }
+    val tiltLabel = when (tiltState) {
+        "none" -> "몸 바름"
+        "left", "tilt_left" -> "몸 왼쪽"
+        "right", "tilt_right" -> "몸 오른쪽"
+        else -> "몸 대기"
+    }
+    Column(Modifier.fillMaxWidth().heightIn(min = 112.dp).clip(RoundedCornerShape(12.dp))
+        .background(Color(0xFFF5F6F5)).padding(horizontal = 12.dp, vertical = 7.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                IconImage(R.drawable.design_neck_normal, Modifier.size(36.dp, 30.dp))
-                Label("목 정상", 10, Muted)
+                val icon = if (neckCaution) R.drawable.home_posture_neck_forward else R.drawable.home_posture_neck
+                IconImage(icon, Modifier.size(36.dp, 30.dp), if (headState == null) Soft else null)
+                Label(headCountdown?.let { "목 · $it" } ?: neckLabel, 10, if (neckCaution) Ink else Muted,
+                    if (neckCaution) FontWeight.Bold else FontWeight.Medium, align = TextAlign.Center)
             }
             Box(Modifier.width(1.dp).height(46.dp).background(Line))
-            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.width(58.dp).height(18.dp).clip(CircleShape).background(Color.White).border(1.dp, Line, CircleShape), contentAlignment = Alignment.Center) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(15.dp)) {
-                        repeat(2) { Box(Modifier.width(1.dp).height(12.dp).background(Line)) }
-                    }
-                    Box(Modifier.size(12.dp).clip(CircleShape).background(Green))
-                }
-                Spacer(Modifier.height(5.dp))
-                Label("몸 바름", 10, Muted)
+            Column(Modifier.weight(1f).padding(start = 3.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                BodyTiltGauge(tiltState, tilted)
+                Spacer(Modifier.height(4.dp))
+                Label(tiltCountdown?.let { "몸 · $it" } ?: tiltLabel, 10, if (tilted) Ink else Muted,
+                    if (tilted) FontWeight.Bold else FontWeight.Medium, align = TextAlign.Center)
             }
         }
+        Spacer(Modifier.height(8.dp))
+        val distance = distanceLabel(distanceMm)
+        val distanceSemantics = if (distance != null && distanceLevel != LivePostureWaiting) Modifier.semantics {
+            contentDescription = distanceLevel
+        } else Modifier
+        Label(distance?.let { "화면 거리 $it" } ?: "화면 거리 · $distanceLevel", 10, if (distanceCaution) Ink else Muted,
+            if (distanceCaution) FontWeight.Bold else FontWeight.Medium, modifier = distanceSemantics)
         Spacer(Modifier.height(3.dp))
-        Label("화면 거리 52cm", 10, Muted)
-        Box(Modifier.fillMaxWidth().height(13.dp), contentAlignment = Alignment.Center) {
-            Row(Modifier.fillMaxWidth().height(6.dp).clip(CircleShape)) {
-                Box(Modifier.weight(.2f).fillMaxHeight().background(Line))
-                Box(Modifier.weight(.2f).fillMaxHeight().background(Color(0xFFBFE5CC)))
-                Box(Modifier.weight(.6f).fillMaxHeight().background(Green))
-            }
-            Box(Modifier.size(12.dp).clip(CircleShape).background(Color.White).border(3.dp, Green, CircleShape))
+        ScreenDistanceGauge(distanceMm, distanceCaution)
+    }
+}
+
+@Composable
+private fun BodyTiltGauge(tiltState: String?, tilted: Boolean) {
+    val dotPosition = when (tiltState) {
+        "left", "tilt_left" -> .13f
+        "none" -> .5f
+        "right", "tilt_right" -> .87f
+        else -> null
+    }
+    BoxWithConstraints(Modifier.widthIn(max = 58.dp).fillMaxWidth().height(18.dp)
+        .clip(CircleShape).background(Color.White).border(1.dp, Color(0xFFE2E5E9), CircleShape),
+        contentAlignment = Alignment.CenterStart) {
+        listOf(.36f, .64f).forEach { tick ->
+            IconImage(R.drawable.home_posture_tilt_tick,
+                Modifier.offset(x = maxWidth * tick).size(1.2.dp, 13.2.dp))
         }
-        Label("     40      50", 8, Soft)
+        if (dotPosition != null) {
+            val dot = if (tilted) R.drawable.home_posture_tilt_dot_caution else R.drawable.home_posture_tilt_dot
+            IconImage(dot,
+                Modifier.offset(x = (maxWidth - 12.dp).coerceAtLeast(0.dp) * dotPosition).size(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun ScreenDistanceGauge(distanceMm: Double?, caution: Boolean) {
+    BoxWithConstraints(Modifier.fillMaxWidth().height(24.dp)) {
+        Row(Modifier.offset(y = 4.dp).fillMaxWidth().height(6.dp).clip(CircleShape)) {
+            Box(Modifier.weight(.2f).fillMaxHeight().background(Color(0xFFE2E5E9)))
+            Box(Modifier.weight(.2f).fillMaxHeight().background(Color(0xFFBFE5CC)))
+            Box(Modifier.weight(.6f).fillMaxHeight().background(Green))
+        }
+        Label("40", 8, Soft, modifier = Modifier.offset(x = maxWidth * .2f - 5.dp, y = 13.dp))
+        Label("50", 8, Soft, modifier = Modifier.offset(x = maxWidth * .4f - 5.dp, y = 13.dp))
+        distanceMm?.takeIf { it.isFinite() }?.let { millimeters ->
+            val position = ((millimeters - 300) / 500).toFloat().coerceIn(0f, 1f)
+            val offset = (maxWidth * position - 6.5.dp).coerceIn(0.dp, (maxWidth - 13.dp).coerceAtLeast(0.dp))
+            val marker = if (caution) R.drawable.home_posture_distance_marker_caution else R.drawable.home_posture_distance_marker
+            IconImage(marker, Modifier.offset(x = offset).size(13.dp))
+        }
     }
 }
 

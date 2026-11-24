@@ -2,6 +2,7 @@ package com.example.barunjari
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.text.KeyboardOptions
@@ -21,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -301,6 +303,8 @@ internal fun ServerHome(
     layout: JSONObject,
     report: JSONObject,
     error: String,
+    postureAlert: PostureAlert? = null,
+    dismissPostureAlert: (AlertPosture) -> Unit = {},
     openFeedback: () -> Unit
 ) {
     ServerColumn {
@@ -334,26 +338,12 @@ internal fun ServerHome(
             if (ratio != null) ProgressRing((ratio * 100).toFloat().coerceIn(0f, 100f), Modifier.size(74.dp),
                 color = Color.White, base = Color.White.copy(alpha = .28f))
         }
-        val pending = current.optJSONArray("pending")
-        if (pending != null && pending.length() > 0) DesignCard(Modifier.fillMaxWidth()) {
-            Label("판정 대기 중", 17, ServerGreen, FontWeight.Bold)
-            Label("자세가 유지되는지 확인하고 있어요. 반영까지 약 5초 걸릴 수 있어요.", 12, ServerMuted)
-            repeat(pending.length()) { i ->
-                val item = pending.optJSONObject(i) ?: return@repeat
-                val state = item.optString("state")
-                val posture = when (item.optString("kind")) {
-                    "seat" -> "좌면 · ${seatKindLabel(state)}"
-                    "head" -> "목 · ${postureName(state)}"
-                    else -> "몸 기울기 · ${postureName(state)}"
-                }
-                Label("$posture · ${ceil(item.optDouble("remaining_sec", 0.0)).toInt()}초 남음", 13)
-                val progress by androidx.compose.animation.core.animateFloatAsState(
-                    targetValue = (1f - item.optDouble("remaining_sec", 4.0).toFloat() / 4f).coerceIn(0f, 1f),
-                    animationSpec = androidx.compose.animation.core.tween(1000), label = "pending")
-                RatioBar(progress, ServerGreen)
-            }
+        postureAlert?.let { alert -> PostureAlertBanner(alert) { dismissPostureAlert(alert.posture) } }
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Label("지금 자세", 17, weight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Label("상체·하체를 따로 기록해요", 12, FeedbackMuted)
         }
-        Label("지금 자세", 17, weight = FontWeight.Bold)
         LivePostureCards(current, layout)
         val goals = report.optJSONArray("goals").records()
         if (goals.isNotEmpty()) DesignCard(Modifier.fillMaxWidth()) {
@@ -376,64 +366,164 @@ internal fun ServerHome(
     }
 }
 
-private data class PressureReading(val x: Double, val y: Double, val percent: Int?)
+@Composable
+internal fun PostureAlertBanner(alert: PostureAlert, dismiss: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Color(0xFF111111)).padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF26282B)),
+            contentAlignment = Alignment.Center) {
+            Icon(R.drawable.alert, Modifier.size(18.dp), ServerGreen)
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Label(alert.title, 13, Color.White, FontWeight.Bold)
+            Label(alert.posture.advice, 12, FeedbackMuted)
+        }
+        Box(Modifier.size(24.dp).semantics { contentDescription = "자세 알림 닫기" }
+            .clickable(role = Role.Button, onClick = dismiss), contentAlignment = Alignment.Center) {
+            Icon(R.drawable.x, Modifier.size(18.dp), FeedbackMuted)
+        }
+    }
+}
 
-@OptIn(ExperimentalLayoutApi::class)
+private fun JSONObject.upperBodyResult(kind: String): String = liveUpperBodyLabel(
+    optString("${kind}_state"), optBoolean("pose_detected"), optJSONObject("confidence")?.number(kind)
+)
+
+private fun JSONObject.pendingPosture(kind: String): JSONObject? =
+    optJSONArray("pending").records().firstOrNull { it.optString("kind") == kind }
+
+private fun JSONObject.remainingTime(): String? = number("remaining_sec")?.let { "${ceil(it).toInt()}초 남음" }
+
 @Composable
 private fun LivePostureCards(current: JSONObject, layout: JSONObject) {
+    val gap = 12.dp
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth >= 340.dp && LocalDensity.current.fontScale <= 1.2f) {
+            val cardWidth = (maxWidth - gap) / 2
+            UpperBodyCard(current, Modifier.matchParentSize().padding(end = cardWidth + gap))
+            SeatPressureCard(current, layout, Modifier.width(cardWidth).align(Alignment.TopEnd))
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(gap)) {
+                UpperBodyCard(current, Modifier.fillMaxWidth())
+                SeatPressureCard(current, layout, Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+@Composable
+private fun UpperBodyCard(current: JSONObject, modifier: Modifier) {
+    val head = current.upperBodyResult("head")
+    val tilt = current.upperBodyResult("tilt")
+    val distanceLevel = postureName(current.optString("distance_level"), LivePostureWaiting)
+    val distanceCaution = distanceLevel == "거리 주의" || distanceLevel == "너무 가까워요"
+    val tilted = tilt != LivePostureWaiting && tilt != "기울기 없음"
+    val status = when {
+        head == "거북목 자세" || tilted || distanceCaution -> "주의"
+        head == "정상 자세" && tilt == "기울기 없음" -> "바른 자세"
+        else -> LivePostureWaiting
+    }
+
+    DesignCard(modifier.testTag("upper-body-card"), padding = 16, cornerRadius = 20) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            PostureCardSource(R.drawable.home_posture_camera, "거리센서 · 카메라")
+            PostureCardStatus(status)
+            PostureGauges(
+                headState = current.optString("head_state").takeIf { head != LivePostureWaiting },
+                tiltState = current.optString("tilt_state").takeIf { tilt != LivePostureWaiting },
+                distanceMm = current.number("distance_mm"),
+                distanceLevel = distanceLevel,
+                distanceCaution = distanceCaution,
+                headCountdown = current.pendingPosture("head")?.remainingTime(),
+                tiltCountdown = current.pendingPosture("tilt")?.remainingTime()
+            )
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val caption = if (maxWidth >= (146 * LocalDensity.current.fontScale).dp) {
+                    "처음 측정한 기준 자세와 비교해요"
+                } else "기준 자세와 비교해요"
+                Label(caption, 10, FeedbackMuted)
+            }
+        }
+    }
+}
+
+private data class PressureReading(val x: Double, val y: Double, val percent: Int?, val raw: Int?)
+
+@Composable
+private fun SeatPressureCard(current: JSONObject, layout: JSONObject, modifier: Modifier) {
     val positions = layout.optJSONArray("positions")
     val ratios = current.optJSONArray("pressure_ratio")
+    val pressure = current.optJSONArray("pressure")
     val readings = if (positions == null) emptyList() else (0 until positions.length()).mapNotNull { index ->
         val point = positions.optJSONArray(index) ?: return@mapNotNull null
         val x = point.number(0) ?: return@mapNotNull null
         val y = point.number(1) ?: return@mapNotNull null
-        PressureReading(x, y, ratios?.number(index)?.let { (it * 100).roundToInt() })
+        PressureReading(x, y, ratios?.number(index)?.let { (it * 100).roundToInt() },
+            pressure?.number(index)?.toInt())
     }
-    val rows = readings.groupBy { it.y }.toSortedMap(reverseOrder())
-    val poseDetected = current.optBoolean("pose_detected")
-    val confidence = current.optJSONObject("confidence")
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val columns = if (maxWidth >= 340.dp && LocalDensity.current.fontScale <= 1.2f) 2 else 1
-        FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = columns,
-            horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            DesignCard(Modifier.weight(1f), padding = 14) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(R.drawable.camera, Modifier.size(18.dp), ServerMuted)
-                    Label("상체 · 화면 거리", 14, weight = FontWeight.Bold)
-                }
-                Spacer(Modifier.height(8.dp))
-                val head = liveUpperBodyLabel(current.optString("head_state"), poseDetected, confidence?.number("head"))
-                val tilt = liveUpperBodyLabel(current.optString("tilt_state"), poseDetected, confidence?.number("tilt"))
-                Label("목 · $head", 13)
-                Label("몸 · $tilt", 13)
-                Spacer(Modifier.height(8.dp))
-                Label("화면 거리", 12, ServerMuted)
-                val distance = distanceLabel(current.number("distance_mm"))
-                Label(distance ?: "측정 대기 중", 16, weight = FontWeight.Bold)
-                if (distance != null) Label(postureName(current.optString("distance_level"), LivePostureWaiting), 12, ServerMuted)
-            }
-            DesignCard(Modifier.weight(1f), padding = 14) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(R.drawable.seat, Modifier.size(18.dp), ServerMuted)
-                    Label("좌면 · 방석 압력", 14, weight = FontWeight.Bold)
-                }
-                Spacer(Modifier.height(8.dp))
-                seatSideLabel(current.optString("seat_side"))?.let { Label(it, 13, weight = FontWeight.SemiBold) }
-                Label(seatKindLabel(current.optString("seat_state"), LivePostureWaiting), 13)
-                if (rows.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    Label("앞 · 왼쪽에서 오른쪽 순", 10, ServerMuted)
-                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        rows.values.forEach { row ->
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                row.sortedBy { it.x }.forEach { reading -> PressureCell(reading.percent, Modifier.weight(1f)) }
+    val rows: List<List<PressureReading?>> = readings.groupBy { it.y }.toSortedMap(reverseOrder())
+        .values.map { row -> row.sortedBy { it.x } }
+        .ifEmpty { List(PostureRules.PRESSURE_SENSOR_COUNT / 2) { listOf(null, null) } }
+
+    val state = current.optString("seat_state")
+    val status = when (state) {
+        "normal" -> "정상"
+        "lean_left" -> "왼쪽 편향"
+        "lean_right" -> "오른쪽 편향"
+        else -> seatKindLabel(state, LivePostureWaiting).takeUnless { it == LivePostureWaiting }
+            ?: seatSideLabel(current.optString("seat_side")) ?: LivePostureWaiting
+    }
+    DesignCard(modifier.testTag("seat-pressure-card"), padding = 16, cornerRadius = 20) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            PostureCardSource(R.drawable.seat, "좌면 · 압력센서")
+            PostureCardStatus(status)
+            Column(Modifier.align(Alignment.CenterHorizontally).widthIn(max = 125.dp).fillMaxWidth()
+                .heightIn(min = 122.dp), verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)) {
+                rows.forEach { row ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        row.forEach { reading ->
+                            val readingLabel = reading?.percent?.let { "$it%" } ?: reading?.raw?.toString() ?: "—"
+                            val rawValue = reading?.raw
+                            val cell = if (rawValue == null) Modifier else Modifier.semantics {
+                                contentDescription = "센서 원시값 $rawValue"
                             }
+                            PressureCell(reading?.percent, Modifier.weight(1f).then(cell), readingLabel)
                         }
                     }
-                    Label("뒤", 10, ServerMuted)
-                } else Label("센서 배치를 불러오지 못했어요", 12, ServerMuted)
+                }
+            }
+            Column {
+                val countdown = current.pendingPosture("seat")?.remainingTime()
+                val sensorCount = rows.sumOf { it.size }
+                Label("앞·뒤 / 좌·우 압력 비율", 10, ServerMuted)
+                Label(if (countdown == null) "FSR ${sensorCount}개 기준" else "FSR ${sensorCount}개 · $countdown", 10, ServerMuted)
             }
         }
+    }
+}
+
+@Composable
+private fun PostureCardSource(icon: Int, title: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Icon(icon, Modifier.size(15.dp), ServerMuted)
+        Label(title, 10, ServerMuted, FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun PostureCardStatus(status: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        val dot = when (status) {
+            "정상", "바른 자세" -> ServerGreen
+            LivePostureWaiting -> FeedbackMuted
+            "주의" -> Color(0xFF111111)
+            else -> Color(0xFF374151)
+        }
+        Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
+        Label(status, 18, weight = FontWeight.Bold)
     }
 }
 
@@ -614,55 +704,224 @@ private fun WeeklyServerReport(report: JSONObject) {
 
 @Composable
 internal fun ServerGoals(report: JSONObject, error: String, selected: Set<Int>, edit: () -> Unit) {
-    ServerColumn {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Label("피드백", 24, weight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            TextButton(onClick = edit) { Text("목표 수정") }
-        }
+    val goals = report.optJSONArray("goals").records().associateBy { it.optString("goal") }
+    val habits = FeedbackHabit.entries.associateBy { it.key }
+
+    Column(
+        Modifier.fillMaxSize().background(Color(0xFFF5F6F5)).verticalScroll(rememberScrollState())
+            .padding(start = 20.dp, top = 8.dp, end = 20.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Label("피드백", 24, weight = FontWeight.Bold)
         if (error.isNotBlank()) Label(error, 13, MaterialTheme.colorScheme.error)
-        val goals = report.optJSONArray("goals").records()
+
+        FeedbackSummary(goals)
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Label("내 목표", 17, weight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Label("편집", 12, ServerGreen, FontWeight.Medium, Modifier.clickable(role = Role.Button, onClick = edit))
+        }
         if (selected.isEmpty()) Label("선택한 목표가 없어요", 14, ServerMuted)
-        else if (goals.isEmpty()) Label("목표별 기록을 기다리고 있어요", 14, ServerMuted)
-        goals.filter { GoalKeys.indexOf(it.optString("goal")) in selected }.forEach { goal ->
-            val key = goal.optString("goal")
-            DesignCard(Modifier.fillMaxWidth()) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    GoalIcon(key)
-                    Label(goalResultLabel(goal), 17, weight = FontWeight.Bold)
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("오늘" to "today", "어제" to "yesterday", "지난주 평균" to "last_week_avg").forEach { (title, field) ->
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Label(title, 11, ServerMuted)
-                            Label(seconds(goal.number(field)), 13,
-                                color = if (field == "today") ServerGreen else MaterialTheme.colorScheme.onSurface,
-                                weight = FontWeight.Bold)
+        GoalKeys.filterIndexed { index, _ -> index in selected }.forEach { key ->
+            FeedbackGoalCard(habits.getValue(key), goals[key])
+        }
+
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Label("오늘의 추천", 17, weight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Label("누적 기록 기반", 12, FeedbackMuted, FontWeight.Medium)
+        }
+        DesignCard(Modifier.fillMaxWidth(), padding = 0) {
+            Column(Modifier.padding(horizontal = 18.dp, vertical = 6.dp)) {
+                FeedbackHabit.entries.forEachIndexed { index, habit ->
+                    if (index > 0) HorizontalDivider(color = Color(0xFFECEDEF))
+                    Row(Modifier.fillMaxWidth().padding(vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        FeedbackIcon(habit.activityIcon, Color(0xFFF3F4F6), Color(0xFF374151))
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                            Label(habit.activity, 14, weight = FontWeight.Bold)
+                            Label(habit.evidence(goals[habit.key]), 12, ServerMuted)
                         }
+                        FeedbackPill(habit.duration)
                     }
                 }
-                val days = goal.optJSONArray("last7").records()
-                if (days.isNotEmpty()) {
-                    Spacer(Modifier.height(12.dp))
-                    Label("최근 7일", 12, ServerMuted)
-                    BarChart(days.map { day ->
-                        val date = day.optString("date")
-                        val value = day.number("value")
-                        ChartDay(date.takeLast(2), value, null, "$date ${seconds(value)}")
-                    })
-                }
-                Spacer(Modifier.height(8.dp))
-                val tip = when (key) {
-                    "cross" -> "두 발을 바닥에 붙이고 다리를 풀어 주세요"
-                    "forward_head" -> "턱을 살짝 당기고 화면을 정면으로 봐 주세요"
-                    "lean" -> "양쪽 좌면에 체중을 고르게 실어 주세요"
-                    else -> "잠시 일어나 가볍게 걸어 주세요"
-                }
-                Label(tip, 13, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                    .background(ChartMint).padding(10.dp))
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Image(painterResource(R.drawable.feedback_info), null, Modifier.size(14.dp))
+            Label("생활습관 참고용 안내이며, 의료적 진단이나 치료를 대신하지 않아요.", 11, FeedbackMuted)
+        }
+    }
+}
+
+private val FeedbackMuted = Color(0xFF9CA3AF)
+
+private enum class FeedbackHabit(
+    val key: String,
+    val title: String,
+    val detail: String,
+    val activity: String,
+    val duration: String,
+    val activityIcon: Int,
+    val tip: String
+) {
+    NECK("forward_head", "거북목 자세", "상체 · 카메라 기준", "목·어깨 가볍게 돌리기", "1분",
+        R.drawable.stretch, "목을 좌우로 15초씩 돌려주세요."),
+    SITTING("long_sitting", "장시간 연속 착석", "착석 시간 기준", "자리에서 일어나 걷기", "2분",
+        R.drawable.walk, ""),
+    LEAN("lean", "한쪽으로 기대기", "좌면 · 체중 편향 추정", "좌우 균형 확인하기", "10초",
+        R.drawable.balance, "양쪽에 체중을 고르게 실어주세요."),
+    CROSS("cross", "다리 꼬기", "다리 꼬기 · 방석 압력 기준", "다리 풀고 양발 바닥에 두기", "수시로",
+        R.drawable.legs, "양발을 바닥에 편하게 내려놓으세요.");
+
+    val goalIcon: Int get() = goalIcons[GoalKeys.indexOf(key)]
+}
+
+private fun feedbackTime(seconds: Double?): String {
+    val total = seconds?.coerceAtLeast(0.0)?.toLong() ?: return "—"
+    val minutes = total / 60
+    return when {
+        minutes >= 60 && minutes % 60 == 0L -> "${minutes / 60}시간"
+        minutes >= 60 -> "${minutes / 60}시간 ${minutes % 60}분"
+        minutes > 0 -> "${minutes}분"
+        else -> "${total}초"
+    }
+}
+
+private fun JSONObject?.upperLegLabel(): String? = when (this?.optJSONObject("main_direction")?.optString("direction")) {
+    "left" -> "주로 왼다리 위"
+    "right" -> "주로 오른다리 위"
+    else -> null
+}
+
+private fun FeedbackHabit.evidence(goal: JSONObject?): String {
+    if (this == FeedbackHabit.LEAN) {
+        val direction = goal?.optJSONObject("main_direction")
+        val left = direction?.number("left_sec") ?: 0.0
+        val right = direction?.number("right_sec") ?: 0.0
+        if (left > 0 || right > 0) {
+            val longer = maxOf(left, right)
+            val shorter = minOf(left, right)
+            val side = if (left > right) "왼쪽" else "오른쪽"
+            return when {
+                shorter == 0.0 -> "${side}으로 기댄 시간이 ${feedbackTime(longer)} 있었어요"
+                longer / shorter < 1.05 -> "좌우로 기댄 시간이 비슷했어요"
+                else -> "${side}으로 기댄 시간이 ${String.format(Locale.KOREA, "%.1f", longer / shorter)}배 길었어요"
             }
         }
     }
+    val today = goal?.number("today") ?: return "기록 없음"
+    val durationText = feedbackTime(today)
+    return when (this) {
+        FeedbackHabit.NECK -> "거북목 자세가 ${durationText} 나타났어요"
+        FeedbackHabit.SITTING -> "최대 연속 착석이 $durationText${if (durationText.endsWith("초")) "였어요" else "이었어요"}"
+        FeedbackHabit.LEAN -> "한쪽으로 기댄 시간이 ${durationText} 있었어요"
+        FeedbackHabit.CROSS -> "다리 꼬기 $durationText" + goal.upperLegLabel()?.let { " · $it" }.orEmpty()
+    }
+}
+
+@Composable
+private fun FeedbackSummary(goals: Map<String, JSONObject>) {
+    val most = FeedbackHabit.entries.filter { it != FeedbackHabit.SITTING }
+        .mapNotNull { habit -> goals[habit.key]?.number("today")?.takeIf { it > 0 }?.let { habit to it } }
+        .maxByOrNull { it.second }
+
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xFF111111)).padding(20.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Label("오늘 가장 많이 나타난 습관", 12, FeedbackMuted, FontWeight.Medium)
+            Label(most?.first?.title ?: "기록 없음", 22, Color.White, FontWeight.Bold)
+            if (most != null) {
+                Label(feedbackTime(most.second), 25, ServerGreen, FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Image(painterResource(R.drawable.feedback_tip_bulb), null, Modifier.size(12.dp, 15.dp))
+                    Label(most.first.tip, 12, FeedbackMuted)
+                }
+            }
+        }
+        Box(Modifier.size(56.dp).clip(RoundedCornerShape(16.dp)).background(Color(0xFF26282B)),
+            contentAlignment = Alignment.Center) {
+            Icon(most?.first?.goalIcon ?: R.drawable.bulb, Modifier.size(26.dp), ServerGreen)
+        }
+    }
+}
+
+@Composable
+private fun FeedbackGoalCard(habit: FeedbackHabit, goal: JSONObject?) {
+    val trend = goal?.optJSONObject("trend")?.optString("direction")
+    val trendLabel = when (trend) {
+        "decreasing" -> "감소 추세"
+        "increasing" -> "증가 추세"
+        "flat" -> "비슷한 추세"
+        else -> null
+    }
+    DesignCard(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            FeedbackIcon(habit.goalIcon, ChartMint, ServerGreen)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Label("${habit.title} 줄이기", 15, weight = FontWeight.Bold)
+                val detail = if (habit == FeedbackHabit.CROSS) goal.upperLegLabel()?.let { "다리 꼬기 · $it" } else null
+                Label(detail ?: habit.detail, 12, ServerMuted)
+            }
+            trendLabel?.let { FeedbackPill(it, green = trend == "decreasing") }
+        }
+        Spacer(Modifier.height(14.dp))
+        val days = goal?.optJSONArray("last7").records().takeLast(7)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            if (maxWidth >= 270.dp && LocalDensity.current.fontScale <= 1.2f) {
+                Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FeedbackMetrics(goal, Modifier.weight(1f))
+                    if (days.isNotEmpty()) FeedbackMiniBars(days)
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FeedbackMetrics(goal, Modifier.fillMaxWidth())
+                    if (days.isNotEmpty()) FeedbackMiniBars(days, Modifier.align(Alignment.End))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FeedbackMetrics(goal: JSONObject?, modifier: Modifier) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        listOf("오늘" to "today", "어제" to "yesterday", "지난주 평균" to "last_week_avg").forEach { (title, field) ->
+            val today = field == "today"
+            Column(Modifier.weight(1f, fill = false), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Label(title, 11, ServerMuted, FontWeight.Medium)
+                Label(feedbackTime(goal?.number(field)), if (today) 19 else 16,
+                    if (today) ServerGreen else Color(0xFF111111), FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FeedbackMiniBars(days: List<JSONObject>, modifier: Modifier = Modifier) {
+    val values = days.map { it.number("value") }
+    val peak = values.filterNotNull().maxOrNull()?.coerceAtLeast(1.0) ?: 1.0
+    val description = days.joinToString(", ") { day -> "${day.optString("date")} ${feedbackTime(day.number("value"))}" }
+    Row(modifier.height(40.dp).clearAndSetSemantics { contentDescription = description },
+        verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        values.forEachIndexed { index, value ->
+            val height = (((value ?: 0.0) / peak) * 40).dp.coerceAtLeast(2.dp)
+            val color = if (index == values.lastIndex && value != null) ServerGreen else Color(0xFFDDE0E4)
+            Box(Modifier.width(7.dp).height(height).clip(RoundedCornerShape(3.dp)).background(color))
+        }
+    }
+}
+
+@Composable
+private fun FeedbackIcon(icon: Int, background: Color, tint: Color) {
+    Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(background), contentAlignment = Alignment.Center) {
+        Icon(icon, Modifier.size(20.dp), tint)
+    }
+}
+
+@Composable
+private fun FeedbackPill(text: String, green: Boolean = true) {
+    Label(text, 11, if (green) ServerGreen else ServerMuted, FontWeight.Medium,
+        Modifier.clip(CircleShape).background(if (green) ChartMint else Color(0xFFF3F4F6))
+            .padding(horizontal = 10.dp, vertical = 4.dp))
 }
 
 private fun goalResultLabel(goal: JSONObject): String {

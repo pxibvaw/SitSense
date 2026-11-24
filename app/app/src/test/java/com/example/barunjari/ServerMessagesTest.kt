@@ -37,8 +37,8 @@ class ServerMessagesTest {
     }
 
     @Test fun weightDirectionAndSeatKindHaveIndependentLabels() {
-        assertEquals("체중 방향 · 왼쪽 (확정)", seatSideLabel("left"))
-        assertEquals("체중 방향 · 오른쪽 (확정)", seatSideLabel("right"))
+        assertEquals("왼쪽 (확정)", seatSideLabel("left"))
+        assertEquals("오른쪽 (확정)", seatSideLabel("right"))
         assertNull(seatSideLabel(""))
         assertNull(seatSideLabel("null"))
         assertNull(seatSideLabel("cross_left"))
